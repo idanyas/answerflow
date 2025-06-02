@@ -29,8 +29,8 @@ func main() {
 	globalAPICache = currency.NewAPICache(2*time.Minute, 2*time.Minute)
 
 	currencyModuleInstance := currency.NewCurrencyConverterModule(
-		[]string{"USD", "EUR"}, // Quick conversion targets (RUB removed as Bybit might handle USDT/RUB, USD/RUB)
-		"RUB",                  // Base conversion currency
+		[]string{"USD", "EUR", "KZT"}, // Quick conversion targets
+		"RUB",                         // Base conversion currency
 		"https://img.icons8.com/badges/100/euro-exchange.png", // Default icon for currency module
 		true, // ShortDisplayFormat: false means "Input = Output", true means "Output" only
 	)
