@@ -1,0 +1,143 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main]
+
+env:
+  PROJECT_NAME: idau
+
+jobs:
+  build_executables:
+    runs-on: self-hosted
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            arch_dir: x86_64
+          - goos: linux
+            goarch: arm64
+            arch_dir: aarch64
+          - goos: linux
+            goarch: arm
+            arch_dir: arm
+          - goos: linux
+            goarch: mips
+            arch_dir: mips
+          - goos: linux
+            goarch: mipsle
+            arch_dir: mipsel
+          - goos: windows
+            goarch: amd64
+            arch_dir: amd64
+          - goos: darwin
+            goarch: amd64
+            arch_dir: x86_64
+          - goos: darwin
+            goarch: arm64
+            arch_dir: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.1"
+
+      - name: Build executable
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          if [ "$GOOS" = "windows" ]; then
+            EXECUTABLE="${PROJECT_NAME}.exe"
+          else
+            EXECUTABLE="${PROJECT_NAME}"
+          fi
+          mkdir -p bin/$GOOS/${{ matrix.arch_dir }}
+          go build -o bin/$GOOS/${{ matrix.arch_dir }}/$EXECUTABLE .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.arch_dir }}
+          path: bin/
+
+  deploy_executables:
+    needs: build_executables
+    runs-on: self-hosted
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bin-artifacts/
+
+      - name: Deploy to WebDAV
+        env:
+          WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+          WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+          WEBDAV_PASSWORD: ${{ secrets.WEBDAV_PASSWORD }}
+        run: |
+          # Reorganize artifacts
+          mkdir -p bin
+          for artifact in bin-artifacts/binary-*; do
+            cp -r $artifact/* bin/
+          done
+
+          # Deploy files
+          find bin -type f | while read file; do
+            os=$(basename $(dirname $(dirname $file)))
+            arch=$(basename $(dirname $file))
+            filename=$(basename $file)
+            # create directories
+            curl -X MKCOL --user $WEBDAV_USER:$WEBDAV_PASSWORD $WEBDAV_URL/$os || true
+            curl -X MKCOL --user $WEBDAV_USER:$WEBDAV_PASSWORD $WEBDAV_URL/$os/$arch || true
+            # upload file
+            curl -T $file --user $WEBDAV_USER:$WEBDAV_PASSWORD $WEBDAV_URL/$os/$arch/$filename
+          done
+
+  build_docker:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Prepare tags
+        id: tags
+        env:
+          REGISTRY: ${{ secrets.REGISTRY }}
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            TAG=${GITHUB_REF#refs/tags/v}
+            MAJOR=$(echo $TAG | cut -d. -f1)
+            MINOR=$(echo $TAG | cut -d. -f2)
+            echo "tags=$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:v$TAG,$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:v$MAJOR,$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:v$MAJOR.$MINOR" >> $GITHUB_OUTPUT
+          else
+            echo "tags=$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:$GITHUB_SHA" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
