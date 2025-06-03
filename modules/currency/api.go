@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -180,14 +181,24 @@ func (ac *APICache) GetRates(ctx context.Context, baseCurrency string) (*RatesAP
 	}
 	defer resp.Body.Close()
 
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		// Error reading response body is serious, but we'll let the JSON decoder try if bodyBytes has content
+	}
+	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Re-wrap for decoder
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("rates API for %s (%s) returned status %d (%s)", baseCurrency, url, resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 
-	// The JSON structure is dynamic: {"date": "...", "base_currency_code": {"target1": rate1, ...}}
 	var tempResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&tempResp); err != nil {
-		return nil, fmt.Errorf("decoding rates response for %s from %s: %w", baseCurrency, url, err)
+		// If decoding fails, include part of the body for context if possible
+		bodyStr := string(bodyBytes)
+		if len(bodyStr) > 200 { // Limit length of body in error
+			bodyStr = bodyStr[:200] + "..."
+		}
+		return nil, fmt.Errorf("decoding rates response for %s from %s (body: '%s'): %w", baseCurrency, url, bodyStr, err)
 	}
 
 	date, ok := tempResp["date"].(string)
@@ -220,7 +231,7 @@ func (ac *APICache) GetRates(ctx context.Context, baseCurrency string) (*RatesAP
 
 	finalRates := make(map[string]float64)
 	for targetCurrencyAPI, rateInterface := range ratesMapInterface {
-		targetCurrency := strings.ToLower(targetCurrencyAPI) // Ensure target keys are also lowercase
+		targetCurrency := strings.ToLower(targetCurrencyAPI)
 		if rate, ok := rateInterface.(float64); ok {
 			finalRates[targetCurrency] = rate
 		} else {
@@ -228,10 +239,10 @@ func (ac *APICache) GetRates(ctx context.Context, baseCurrency string) (*RatesAP
 				if parsedRate, errParse := strconv.ParseFloat(rateStr, 64); errParse == nil {
 					finalRates[targetCurrency] = parsedRate
 				} else {
-					log.Printf("Warning: rate for target %s (from base %s) is not a float64 and not a parsable string: %T, %v. URL: %s", targetCurrency, baseCurrency, rateInterface, rateInterface, url)
+					log.Printf("Warning: rate for target %s (from base %s) is not a float64 and not a parsable string: %T, %v. Parse error: %v. URL: %s", targetCurrency, baseCurrency, rateInterface, rateInterface, errParse, url)
 				}
 			} else {
-				log.Printf("Warning: rate for target %s (from base %s) is not a float64: %T, %v. URL: %s", targetCurrency, baseCurrency, rateInterface, rateInterface, url)
+				log.Printf("Warning: rate for target %s (from base %s) is not a float64 or string: %T, %v. URL: %s", targetCurrency, baseCurrency, rateInterface, rateInterface, url)
 			}
 		}
 	}
@@ -247,22 +258,28 @@ func (ac *APICache) GetRates(ctx context.Context, baseCurrency string) (*RatesAP
 
 // GetConversionRate returns the rate for 1 unit of fromCurrency to toCurrency, and the date of the rate.
 func (ac *APICache) GetConversionRate(ctx context.Context, fromCurrency, toCurrency string) (float64, string, error) {
-	fromCurrency = strings.ToLower(fromCurrency)
-	toCurrency = strings.ToLower(toCurrency)
+	lcFromCurrency := strings.ToLower(fromCurrency)
+	lcToCurrency := strings.ToLower(toCurrency)
 
-	if fromCurrency == toCurrency {
+	if lcFromCurrency == lcToCurrency {
 		return 1.0, time.Now().Format("2006-01-02"), nil // Rate is 1 for same currency
 	}
 
-	ratesResp, err := ac.GetRates(ctx, fromCurrency)
+	ratesResp, err := ac.GetRates(ctx, lcFromCurrency)
 	if err != nil {
-		return 0, "", fmt.Errorf("getting rates for base %s when converting to %s: %w", fromCurrency, toCurrency, err)
+		return 0, "", fmt.Errorf("getting rates for base %s when converting to %s: %w", lcFromCurrency, lcToCurrency, err)
 	}
 
-	rate, ok := ratesResp.Rates[toCurrency]
+	rate, ok := ratesResp.Rates[lcToCurrency]
 	if !ok {
-		log.Printf("Target currency %s not found in rates for base %s. Available targets: %d", toCurrency, fromCurrency, len(ratesResp.Rates))
-		return 0, "", fmt.Errorf("conversion rate from %s to %s not found directly. Check API for '%s' base", fromCurrency, toCurrency, fromCurrency)
+		// Provide more context if a rate is not found
+		availableTargets := make([]string, 0, len(ratesResp.Rates))
+		for k := range ratesResp.Rates {
+			availableTargets = append(availableTargets, k)
+		}
+		sort.Strings(availableTargets) // Sort for consistent logging
+		log.Printf("Target currency '%s' not found in rates for base '%s'. Date: %s. Available targets (%d): %v", lcToCurrency, lcFromCurrency, ratesResp.Date, len(ratesResp.Rates), availableTargets)
+		return 0, "", fmt.Errorf("conversion rate from %s to %s not found directly. Check API for '%s' base", lcFromCurrency, lcToCurrency, lcFromCurrency)
 	}
 
 	return rate, ratesResp.Date, nil
@@ -379,11 +396,6 @@ func (ac *APICache) GetBybitP2PBestOffer(ctx context.Context, side string) (*Byb
 		}
 	}
 
-	// If loop finishes, no suitable offer was found
-	// Cache a "not found" marker (nil) to prevent re-fetching for a short period
-	// Note: go-cache doesn't distinguish between "key not found" and "key found with nil value" easily for Get()
-	// So, we might just return error and not cache negative results, or cache an empty struct / specific marker.
-	// For simplicity, we will not cache "not found" for now and let it retry on next call.
 	return nil, fmt.Errorf("no suitable Bybit P2P offer found for side %s, token %s, currency %s with amount %s", side, tokenId, currencyId, bybitP2PRequestAmount)
 }
 

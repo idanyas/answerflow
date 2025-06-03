@@ -74,10 +74,17 @@ var (
 	currencyCodeStrictRegexPart = `[a-zA-Z]{3,10}`                                                                        // Stricter for currency codes
 
 	// Amount (opt symbol, num with k/m) (opt op num with k/m) FromCurr (sep) ToCurr
+	// MODIFIED: Added \b to "to" and "in" to ensure they are whole words and don't match prefixes.
 	regexAmountCurrencyToCurrency = regexp.MustCompile(
-		`(?i)^\s*(` + symbolAndAmountRegexPart + `)([\*\/]\s*` + amountRegexPart + `)?\s*(` + currencyTokenRegexPart + `)\s*(?:to|in|=|-?>|→|2)\s*(` + currencyTokenRegexPart + `)\s*$`)
+		`(?i)^\s*(` + symbolAndAmountRegexPart + `)([\*\/]\s*` + amountRegexPart + `)?\s*(` + currencyTokenRegexPart + `)\s*(?:to\b|in\b|=|-?>|→|2)\s*(` + currencyTokenRegexPart + `)\s*$`)
+
+	// NEW: Amount (opt symbol, num with k/m) (opt op num with k/m) SPACE FromToken SPACE ToToken
+	// Example: "1 USD TON", "100 dollars euros"
+	regexAmountSpacedTokens = regexp.MustCompile(
+		`(?i)^\s*(` + symbolAndAmountRegexPart + `)([\*\/]\s*` + amountRegexPart + `)?\s+(` + currencyTokenRegexPart + `)\s+(` + currencyTokenRegexPart + `)\s*$`)
 
 	// Amount (opt symbol, num with k/m) (opt op num with k/m) FromCurr (opt space) ToCurr (for 3+ char codes)
+	// This uses currencyCodeStrictRegexPart for currency parts.
 	regexAmountCurrencyCurrency = regexp.MustCompile(
 		`(?i)^\s*(` + symbolAndAmountRegexPart + `)([\*\/]\s*` + amountRegexPart + `)?\s*(` + currencyCodeStrictRegexPart + `)\s*(` + currencyCodeStrictRegexPart + `)\s*$`)
 
@@ -87,7 +94,7 @@ var (
 
 	// Question format: "how much is AMOUNT CURR in CURR?" or "what is AMOUNT CURR?"
 	regexQuestion = regexp.MustCompile(
-		`(?i)^\s*(?:how\s+much\s+is|what\s*'?s|what\s+is)\s+(` + symbolAndAmountRegexPart + `)\s*(` + currencyTokenRegexPart + `)(?:\s+(?:in|to)\s+(` + currencyTokenRegexPart + `))?\??\s*$`)
+		`(?i)^\s*(?:how\s+much\s+is|what\s*'?s|what\s+is)\s+(` + symbolAndAmountRegexPart + `)\s*(` + currencyTokenRegexPart + `)(?:\s+(?:in\b|to\b)\s+(` + currencyTokenRegexPart + `))?\??\s*$`)
 
 	// "from/in AMOUNT CURR" or "from/in CURR AMOUNT"
 	regexFromIn = regexp.MustCompile(
@@ -178,7 +185,7 @@ func ParseQuery(query string, currencyData *CurrencyData) (*ConversionRequest, e
 		toCurrStr := strings.TrimSpace(matches[4])
 
 		fromCurrStr, fromAmountStr = currencyData.ExtractSymbol(fromCurrStr, fromAmountStr)
-		toCurrStr, _ = currencyData.ExtractSymbol(toCurrStr, "")
+		toCurrStr, _ = currencyData.ExtractSymbol(toCurrStr, "") // Resolve if 'toCurrStr' is a symbol like '₽' or '$'
 
 		var err error
 		req.Amount, err = evaluateAmountExpression(fromAmountStr, opAmountStr)
@@ -197,7 +204,37 @@ func ParseQuery(query string, currencyData *CurrencyData) (*ConversionRequest, e
 		return &req, nil
 	}
 
+	// Try regexAmountSpacedTokens: "1 USD TON", "100 dollars euros"
+	// This uses currencyTokenRegexPart for currency parts and requires spaces.
+	matches = regexAmountSpacedTokens.FindStringSubmatch(query)
+	if len(matches) == 5 { // full match + 4 groups (amount_op_group, amount_str_in_group1, from_curr_str, to_curr_str)
+		fromAmountStr := strings.TrimSpace(matches[1]) // Amount part, potentially with symbol
+		opAmountStr := strings.TrimSpace(matches[2])   // Operator part
+		fromCurrStr := strings.TrimSpace(matches[3])   // From currency token
+		toCurrStr := strings.TrimSpace(matches[4])     // To currency token
+
+		fromCurrStr, fromAmountStr = currencyData.ExtractSymbol(fromCurrStr, fromAmountStr)
+		toCurrStr, _ = currencyData.ExtractSymbol(toCurrStr, "") // Resolve if 'toCurrStr' is a symbol
+
+		var err error
+		req.Amount, err = evaluateAmountExpression(fromAmountStr, opAmountStr)
+		if err != nil {
+			return nil, fmt.Errorf("evaluating amount for AmountSpacedTokens ('%s', op '%s'): %w", fromAmountStr, opAmountStr, err)
+		}
+
+		req.FromCurrency, err = currencyData.ResolveCurrency(fromCurrStr)
+		if err != nil {
+			return nil, fmt.Errorf("resolving from_currency '%s' (AmountSpacedTokens): %w", fromCurrStr, err)
+		}
+		req.ToCurrency, err = currencyData.ResolveCurrency(toCurrStr)
+		if err != nil {
+			return nil, fmt.Errorf("resolving to_currency '%s' (AmountSpacedTokens): %w", toCurrStr, err)
+		}
+		return &req, nil
+	}
+
 	// Try regexAmountCurrencyCurrency: "50usdeur", "100 RUB JPY"
+	// This uses currencyCodeStrictRegexPart for currency parts and optional spaces.
 	matches = regexAmountCurrencyCurrency.FindStringSubmatch(query)
 	if len(matches) == 5 { // full match + 4 groups
 		fromAmountStr := strings.TrimSpace(matches[1])
@@ -206,6 +243,7 @@ func ParseQuery(query string, currencyData *CurrencyData) (*ConversionRequest, e
 		toCurrStr := strings.TrimSpace(matches[4])
 
 		fromCurrStr, fromAmountStr = currencyData.ExtractSymbol(fromCurrStr, fromAmountStr)
+		// No ExtractSymbol for toCurrStr here, as it's expected to be a strict code. ResolveCurrency handles it.
 
 		var err error
 		req.Amount, err = evaluateAmountExpression(fromAmountStr, opAmountStr)
@@ -224,12 +262,13 @@ func ParseQuery(query string, currencyData *CurrencyData) (*ConversionRequest, e
 	}
 
 	// Try regexQuestion: "how much is 100 dollars in rubles?", "what is 30 yuan?"
+	// MODIFIED: Added \b to "in" and "to" in the optional "in/to TO_CURRENCY" part
 	matches = regexQuestion.FindStringSubmatch(query)
-	if len(matches) > 0 {
+	if len(matches) > 0 { // matches can be 3 or 4 depending on whether ToCurrency is present
 		amountStr := strings.TrimSpace(matches[1])
 		fromCurrStr := strings.TrimSpace(matches[2])
 		toCurrStr := ""
-		if len(matches) == 4 && matches[3] != "" {
+		if len(matches) == 4 && matches[3] != "" { // Group 3 is optional (ToCurrency)
 			toCurrStr = strings.TrimSpace(matches[3])
 		}
 
@@ -258,12 +297,12 @@ func ParseQuery(query string, currencyData *CurrencyData) (*ConversionRequest, e
 
 	// Try regexFromIn: "from 50 rub", "in euros 75"
 	matches = regexFromIn.FindStringSubmatch(query)
-	if len(matches) > 0 {
+	if len(matches) > 0 { // matches will have 5 elements: full, (amt, curr) OR (curr, amt)
 		var amountStr, currStr string
-		if matches[1] != "" && matches[2] != "" {
+		if matches[1] != "" && matches[2] != "" { // (amount) (currency)
 			amountStr = strings.TrimSpace(matches[1])
 			currStr = strings.TrimSpace(matches[2])
-		} else if matches[3] != "" && matches[4] != "" {
+		} else if matches[3] != "" && matches[4] != "" { // (currency) (amount)
 			currStr = strings.TrimSpace(matches[3])
 			amountStr = strings.TrimSpace(matches[4])
 		} else {
@@ -286,7 +325,7 @@ func ParseQuery(query string, currencyData *CurrencyData) (*ConversionRequest, e
 
 	// Try regexAmountCurrency: "20 usd", "$50" (implies quick/base conversion)
 	matches = regexAmountCurrency.FindStringSubmatch(query)
-	if len(matches) == 4 {
+	if len(matches) == 4 { // full match + 3 groups (amount_op_group, amount, from_currency)
 		fromAmountStrRaw := strings.TrimSpace(matches[1])
 		opAmountStr := strings.TrimSpace(matches[2])
 		fromCurrStrCandidate := strings.TrimSpace(matches[3])

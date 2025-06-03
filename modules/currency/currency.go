@@ -99,7 +99,6 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 		res, errGen := m.generateConversionResult(ctx, parsedRequest, parsedRequest.ToCurrency, apiCache, scoreSpecificConversion, ac)
 		if errGen != nil {
 			log.Printf("CurrencyConverterModule: Error generating specific conversion for %s to %s: %v", parsedRequest.FromCurrency, parsedRequest.ToCurrency, errGen)
-			// Do not return error, just skip this result
 		} else if res != nil {
 			results = append(results, *res)
 		}
@@ -164,16 +163,13 @@ func (m *CurrencyConverterModule) generateConversionResult(
 	var p2pDetails *BybitP2PItemDetailsForSubtitle
 
 	// --- Bybit P2P Integration ---
-	// Determine if this is a USDT/RUB or USD/RUB pair
 	isP2PCandidate := false
-	bybitSide := "" // "0" for SELL USDT, "1" for BUY USDT
+	bybitSide := ""
 
-	// Normalize FromCurrency to USDT if it's USD for Bybit context
 	normalizedFromCurrencyForP2P := req.FromCurrency
 	if normalizedFromCurrencyForP2P == "USD" {
 		normalizedFromCurrencyForP2P = "USDT"
 	}
-	// Normalize TargetCurrency to USDT if it's USD for Bybit context
 	normalizedTargetCurrencyForP2P := targetCurrency
 	if normalizedTargetCurrencyForP2P == "USD" {
 		normalizedTargetCurrencyForP2P = "USDT"
@@ -181,30 +177,29 @@ func (m *CurrencyConverterModule) generateConversionResult(
 
 	if normalizedFromCurrencyForP2P == "USDT" && normalizedTargetCurrencyForP2P == "RUB" {
 		isP2PCandidate = true
-		bybitSide = "0" // User sells USDT to get RUB (Bybit Ad: Buyer wants USDT, offers RUB) -> Highest price
+		bybitSide = "0"
 	} else if normalizedFromCurrencyForP2P == "RUB" && normalizedTargetCurrencyForP2P == "USDT" {
 		isP2PCandidate = true
-		bybitSide = "1" // User sells RUB to get USDT (Bybit Ad: Seller has USDT, wants RUB) -> Lowest price
+		bybitSide = "1"
 	}
 
 	if isP2PCandidate {
 		bybitOffer, bybitErr := apiCache.GetBybitP2PBestOffer(ctx, bybitSide)
 		if bybitErr == nil && bybitOffer != nil && bybitOffer.PriceFloat > 0 {
-			p2pPrice := bybitOffer.PriceFloat // This is always RUB per USDT from Bybit offers
+			p2pPrice := bybitOffer.PriceFloat
 
-			if normalizedFromCurrencyForP2P == "USDT" { // User converting USDT to RUB
-				rate = p2pPrice // Rate is RUB per USDT
-			} else { // User converting RUB to USDT
-				rate = 1.0 / p2pPrice // Rate is USDT per RUB
+			if normalizedFromCurrencyForP2P == "USDT" {
+				rate = p2pPrice
+			} else {
+				rate = 1.0 / p2pPrice
 			}
 			sourceName = "Bybit P2P"
-			currentScore = scoreP2PConversion // Boost score for P2P
+			currentScore = scoreP2PConversion
 			p2pDetails = &BybitP2PItemDetailsForSubtitle{
 				NickName:  bybitOffer.NickName,
 				MinAmount: bybitOffer.MinAmount,
 				MaxAmount: bybitOffer.MaxAmount,
 			}
-			// No specific date for P2P rates, they are live
 		} else {
 			if bybitErr != nil {
 				log.Printf("CurrencyConverterModule: Bybit P2P fetch failed for %s (%s) to %s (%s), side %s: %v. Falling back.",
@@ -217,7 +212,6 @@ func (m *CurrencyConverterModule) generateConversionResult(
 					targetCurrency, normalizedTargetCurrencyForP2P,
 					bybitSide)
 			}
-			// Fallback to standard API will occur as sourceName is still "API"
 		}
 	}
 	// --- End Bybit P2P Integration ---
@@ -229,7 +223,6 @@ func (m *CurrencyConverterModule) generateConversionResult(
 		}
 		if rate == 0 {
 			log.Printf("Warning: CurrencyConverterModule: Zero rate from standard API for %s to %s.", req.FromCurrency, targetCurrency)
-			// Allow zero rate to proceed, might be a valid (though unlikely) scenario or an API issue.
 		}
 	}
 
@@ -252,9 +245,7 @@ func (m *CurrencyConverterModule) generateConversionResult(
 	if sourceName == "Bybit P2P" && p2pDetails != nil {
 		// subTitleExtra = fmt.Sprintf(" (Bybit P2P: @%s, Avail: %s-%s %s)", p2pDetails.NickName, p2pDetails.MinAmount, p2pDetails.MaxAmount, bybitP2PFixedCurrencyID)
 	} else if sourceName == "API" && rateDate != "" {
-		// subTitleExtra = fmt.Sprintf(" (Rate from %s)", rateDate) // Original format with date
-		// Subtitle format was changed to not include date for standard API, keeping it concise.
-		// If date is desired for standard API, uncomment above and adjust.
+		// subTitleExtra = fmt.Sprintf(" (Rate from %s)", rateDate)
 	}
 	subTitle := subTitleBase + subTitleExtra
 
@@ -280,7 +271,7 @@ func formatRate(rate float64) string {
 		return "0"
 	}
 	var formattedRate string
-	if rate < 0.00000001 && rate > 0 { // Very small non-zero rates (e.g. for crypto dust)
+	if rate < 0.00000001 && rate > 0 {
 		formattedRate = strconv.FormatFloat(rate, 'f', 10, 64)
 	} else if rate < 0.0001 {
 		formattedRate = strconv.FormatFloat(rate, 'f', 8, 64)
