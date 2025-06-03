@@ -7,6 +7,7 @@ on:
       - "v*"
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   PROJECT_NAME: answerflow
@@ -121,16 +122,19 @@ jobs:
 
       - name: Prepare tags
         id: tags
-        env:
-          REGISTRY: ${{ secrets.REGISTRY }}
-          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
         run: |
           if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            # Tag push: Extract version components
             TAG=${GITHUB_REF#refs/tags/v}
             MAJOR=$(echo $TAG | cut -d. -f1)
             MINOR=$(echo $TAG | cut -d. -f2)
-            echo "tags=$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:v$TAG,$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:v$MAJOR,$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:v$MAJOR.$MINOR" >> $GITHUB_OUTPUT
+            # Set tags: vTAG, vMAJOR, vMAJOR.MINOR, latest
+            echo "tags=$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:v$TAG,$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:v$MAJOR,$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:v$MAJOR.$MINOR,$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:latest" >> $GITHUB_OUTPUT
+          elif [[ $GITHUB_REF == refs/heads/main && $GITHUB_EVENT_NAME == push ]]; then
+            # Commit to main: Tag with commit hash and 'main'
+            echo "tags=$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:$GITHUB_SHA,$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:main" >> $GITHUB_OUTPUT
           else
+            # Pull request or other: Tag only with commit hash
             echo "tags=$REGISTRY/$REGISTRY_USER/$PROJECT_NAME:$GITHUB_SHA" >> $GITHUB_OUTPUT
           fi
 
