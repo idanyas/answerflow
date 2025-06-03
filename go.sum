@@ -1,5 +1,7 @@
 github.com/cockroachdb/apd v1.1.0 h1:3LFP3629v+1aKXU5Q37mxmRxX/pIu1nijXydLShEq5I=
 github.com/cockroachdb/apd v1.1.0/go.mod h1:8Sl8LxpKi29FqWXR16WEFZRNSz3SoPzUzeMeY4+DwBQ=
+github.com/expr-lang/expr v1.17.4 h1:qhTVftZ2Z3WpOEXRHWErEl2xf1Kq011MnQmWgLq06CY=
+github.com/expr-lang/expr v1.17.4/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
 github.com/leekchan/accounting v1.0.0 h1:+Wd7dJ//dFPa28rc1hjyy+qzCbXPMR91Fb6F1VGTQHg=
 github.com/leekchan/accounting v1.0.0/go.mod h1:3timm6YPhY3YDaGxl0q3eaflX0eoSx3FXn7ckHe4tO0=
 github.com/lib/pq v1.0.0 h1:X5PMW56eZitiTeO7tKzZxFCSpbFZJtkMMooicw2us9A=
