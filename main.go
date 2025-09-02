@@ -30,7 +30,10 @@ var (
 )
 
 func main() {
-	globalAPICache = currency.NewAPICache(2*time.Minute, 2*time.Minute)
+	// Initialize the new proactive API cache
+	globalAPICache = currency.NewAPICache()
+	// Start the background processes to keep the cache updated
+	globalAPICache.StartBackgroundUpdaters()
 
 	currencyModuleInstance := currency.NewCurrencyConverterModule(
 		[]string{"USD", "EUR", "KZT"}, // Quick conversion targets
@@ -79,6 +82,8 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(m modules.Module) {
 			defer wg.Done()
+			// The context passed to modules is for the overall request timeout,
+			// but individual modules might not need it if data is pre-cached.
 			moduleCtx := ctx
 
 			results, err := m.ProcessQuery(moduleCtx, query, globalAPICache)

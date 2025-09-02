@@ -1,9 +1,10 @@
-package currency // Stays as package currency
+package currency
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 	"strings"
 
@@ -16,8 +17,15 @@ const (
 	scoreSpecificConversion = 100
 	scoreBaseConversion     = 90
 	scoreQuickConversion    = 80
-	scoreP2PConversion      = 110 // Higher score for P2P direct match
+	scoreWhitebird          = 110 // Higher score for Whitebird direct match
 )
+
+// highPrecisionCurrencies defines currencies that need more than 2 decimal places for clipboard operations.
+var highPrecisionCurrencies = map[string]int{
+	"BTC":  8,
+	"ETH":  8,
+	"USDT": 6, // Often traded to more than 2 decimal places
+}
 
 // CurrencyConverterModule handles currency conversion queries.
 type CurrencyConverterModule struct {
@@ -26,13 +34,7 @@ type CurrencyConverterModule struct {
 	defaultIconPath        string
 	currencyData           *CurrencyData
 	ShortDisplayFormat     bool // true for "Output only", false for "Input = Output"
-}
-
-// BybitP2PItemDetailsForSubtitle holds specific details from a P2P offer for display.
-type BybitP2PItemDetailsForSubtitle struct {
-	NickName  string
-	MinAmount string // Original string format for display
-	MaxAmount string // Original string format for display
+	invertedRatePairs      map[string]bool
 }
 
 // NewCurrencyConverterModule creates a new instance of the currency converter.
@@ -42,12 +44,21 @@ func NewCurrencyConverterModule(quickTargets []string, baseCurrency, iconPath st
 		normalizedQuickTargets[i] = strings.ToUpper(target)
 	}
 
+	// Define the pairs for which the subtitle rate should be inverted.
+	// Key is in "FROM_TO" format.
+	invertedPairs := map[string]bool{
+		"RUB_USD":  true,
+		"RUB_EUR":  true,
+		"RUB_USDT": true, // Also handle the aliased USDT case
+	}
+
 	return &CurrencyConverterModule{
 		quickConversionTargets: normalizedQuickTargets,
 		baseConversionCurrency: strings.ToUpper(baseCurrency),
 		defaultIconPath:        iconPath,
 		currencyData:           NewCurrencyData(),
 		ShortDisplayFormat:     shortDisplay,
+		invertedRatePairs:      invertedPairs,
 	}
 }
 
@@ -67,18 +78,29 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 		return nil, nil
 	}
 
-	allCurrencies, err := apiCache.GetAllCurrencies(ctx)
-	if err != nil {
-		log.Printf("Warning: CurrencyConverterModule: failed to load all currency definitions for dynamic aliases: %v", err)
-	}
-	if allCurrencies != nil || !m.currencyData.initialised {
-		m.currencyData.PopulateDynamicAliases(allCurrencies)
+	// Populate dynamic aliases from the cache if not already done.
+	if !m.currencyData.initialised {
+		allCurrencies, err := apiCache.GetAllCurrencies()
+		if err != nil {
+			log.Printf("Warning: CurrencyConverterModule: failed to load all currency definitions from cache: %v", err)
+		} else {
+			m.currencyData.PopulateDynamicAliases(allCurrencies)
+		}
 	}
 
 	parsedRequest, err := ParseQuery(query, m.currencyData)
 	if err != nil {
 		return nil, nil // No error returned to main, just no results for this module
 	}
+
+	// --- USD to USDT Alias Logic ---
+	if parsedRequest.FromCurrency == "USD" {
+		parsedRequest.FromCurrency = "USDT"
+	}
+	if parsedRequest.ToCurrency == "USD" {
+		parsedRequest.ToCurrency = "USDT"
+	}
+	// --- End Alias Logic ---
 
 	var results []commontypes.FlowResult
 	ac := accounting.Accounting{Precision: 2}
@@ -148,88 +170,107 @@ func (m *CurrencyConverterModule) generateConversionResult(
 	req *ConversionRequest,
 	targetCurrency string,
 	apiCache *APICache,
-	baseScore int, // Use baseScore, P2P might override it
+	baseScore int,
 	ac accounting.Accounting) (*commontypes.FlowResult, error) {
 
-	if req.FromCurrency == targetCurrency {
-		return nil, fmt.Errorf("cannot convert currency %s to itself", req.FromCurrency)
+	// ALIASING: Handle USD as an alias for USDT for the target currency.
+	effectiveTargetCurrency := targetCurrency
+	if effectiveTargetCurrency == "USD" {
+		effectiveTargetCurrency = "USDT"
 	}
 
-	var rate float64
-	var rateDate string // Only populated by standard API for now
+	// The req.FromCurrency is already aliased in ProcessQuery.
+	// This check now correctly prevents USDT -> USDT self-conversion (e.g. for a "1 usd" query).
+	if req.FromCurrency == effectiveTargetCurrency {
+		return nil, nil
+	}
+
+	// --- Whitebird Provider Logic ---
+	isWhitebirdPair := true
+	var finalAmount float64
+	var effectiveRate float64
+	var rawRate float64
 	var err error
-	currentScore := baseScore
-	sourceName := "API"
-	var p2pDetails *BybitP2PItemDetailsForSubtitle
 
-	// --- Bybit P2P Integration ---
-	isP2PCandidate := false
-	bybitSide := ""
-
-	normalizedFromCurrencyForP2P := req.FromCurrency
-	if normalizedFromCurrencyForP2P == "USD" {
-		normalizedFromCurrencyForP2P = "USDT"
-	}
-	normalizedTargetCurrencyForP2P := targetCurrency
-	if normalizedTargetCurrencyForP2P == "USD" {
-		normalizedTargetCurrencyForP2P = "USDT"
-	}
-
-	if normalizedFromCurrencyForP2P == "USDT" && normalizedTargetCurrencyForP2P == "RUB" {
-		isP2PCandidate = true
-		bybitSide = "0"
-	} else if normalizedFromCurrencyForP2P == "RUB" && normalizedTargetCurrencyForP2P == "USDT" {
-		isP2PCandidate = true
-		bybitSide = "1"
-	}
-
-	if isP2PCandidate {
-		bybitOffer, bybitErr := apiCache.GetBybitP2PBestOffer(ctx, bybitSide)
-		if bybitErr == nil && bybitOffer != nil && bybitOffer.PriceFloat > 0 {
-			p2pPrice := bybitOffer.PriceFloat
-
-			if normalizedFromCurrencyForP2P == "USDT" {
-				rate = p2pPrice
+	// Use the aliased effectiveTargetCurrency for logic checks.
+	switch {
+	case req.FromCurrency == "RUB" && effectiveTargetCurrency == "USDT":
+		rawRate, err = apiCache.GetWhitebirdRate("RUB", "USDT")
+		if err == nil {
+			fiatFee := req.Amount * 0.02439
+			cryptoFee := 0.038541 * rawRate
+			netToConvert := req.Amount - fiatFee - cryptoFee
+			// MODIFIED: Prevent negative conversion results if fees exceed the amount.
+			if netToConvert <= 0 {
+				finalAmount = 0
 			} else {
-				rate = 1.0 / p2pPrice
-			}
-			sourceName = "Bybit P2P"
-			currentScore = scoreP2PConversion
-			p2pDetails = &BybitP2PItemDetailsForSubtitle{
-				NickName:  bybitOffer.NickName,
-				MinAmount: bybitOffer.MinAmount,
-				MaxAmount: bybitOffer.MaxAmount,
-			}
-		} else {
-			if bybitErr != nil {
-				log.Printf("CurrencyConverterModule: Bybit P2P fetch failed for %s (%s) to %s (%s), side %s: %v. Falling back.",
-					req.FromCurrency, normalizedFromCurrencyForP2P,
-					targetCurrency, normalizedTargetCurrencyForP2P,
-					bybitSide, bybitErr)
-			} else if bybitOffer == nil || bybitOffer.PriceFloat <= 0 {
-				log.Printf("CurrencyConverterModule: No valid Bybit P2P offer or zero price for %s (%s) to %s (%s), side %s. Falling back.",
-					req.FromCurrency, normalizedFromCurrencyForP2P,
-					targetCurrency, normalizedTargetCurrencyForP2P,
-					bybitSide)
+				converted := netToConvert / rawRate
+				finalAmount = converted / 1.0217 // Add +2.17% fee (Sber Pay)
 			}
 		}
-	}
-	// --- End Bybit P2P Integration ---
 
-	if sourceName == "API" { // If not P2P or P2P failed
-		rate, rateDate, err = apiCache.GetConversionRate(ctx, req.FromCurrency, targetCurrency)
+	case req.FromCurrency == "USDT" && effectiveTargetCurrency == "RUB":
+		rawRate, err = apiCache.GetWhitebirdRate("USDT", "RUB")
+		if err == nil {
+			converted := (req.Amount * rawRate) * 0.985
+			finalAmount = converted / 1.015 // Add +1.5% fee (MIR cards payout)
+		}
+
+	case req.FromCurrency == "BYN" && effectiveTargetCurrency == "USDT":
+		rawRate, err = apiCache.GetWhitebirdRate("BYN", "USDT")
+		if err == nil {
+			fiatFee := req.Amount * 0.024371
+			cryptoFee := 0.038778 * rawRate
+			netToConvert := req.Amount - fiatFee - cryptoFee
+			// MODIFIED: Prevent negative conversion results if fees exceed the amount.
+			if netToConvert <= 0 {
+				finalAmount = 0
+			} else {
+				finalAmount = netToConvert / rawRate
+			}
+		}
+
+	default:
+		isWhitebirdPair = false
+	}
+
+	if isWhitebirdPair {
 		if err != nil {
-			return nil, fmt.Errorf("getting conversion rate for %s to %s from standard API: %w", req.FromCurrency, targetCurrency, err)
+			return nil, fmt.Errorf("getting Whitebird rate: %w", err)
 		}
-		if rate == 0 {
-			log.Printf("Warning: CurrencyConverterModule: Zero rate from standard API for %s to %s.", req.FromCurrency, targetCurrency)
+		// Ensure final amount is not negative.
+		finalAmount = math.Max(0, finalAmount)
+		if req.Amount > 0 {
+			effectiveRate = finalAmount / req.Amount
 		}
+		// Pass the original targetCurrency for display purposes.
+		return m.formatResult(req, targetCurrency, finalAmount, effectiveRate, scoreWhitebird, "Whitebird", ac), nil
 	}
+	// --- End Whitebird Provider Logic ---
 
+	// --- Default Provider Fallback ---
+	// Use the aliased effectiveTargetCurrency for fetching the rate.
+	rate, _, err := apiCache.GetConversionRate(req.FromCurrency, effectiveTargetCurrency)
+	if err != nil {
+		return nil, fmt.Errorf("getting conversion rate from default provider: %w", err)
+	}
 	convertedAmount := req.Amount * rate
+	// Pass the original targetCurrency for display purposes.
+	return m.formatResult(req, targetCurrency, convertedAmount, rate, baseScore, "currency-api", ac), nil
+}
+
+// formatResult formats the final result into a FlowResult.
+func (m *CurrencyConverterModule) formatResult(
+	req *ConversionRequest,
+	targetCurrency string,
+	finalAmount float64,
+	displayRate float64,
+	score int,
+	sourceName string,
+	ac accounting.Accounting) *commontypes.FlowResult {
 
 	formattedInputAmount := ac.FormatMoneyFloat64(req.Amount)
-	formattedConvertedAmount := ac.FormatMoneyFloat64(convertedAmount)
+	formattedConvertedAmount := ac.FormatMoneyFloat64(finalAmount)
 
 	var title string
 	if m.ShortDisplayFormat {
@@ -240,38 +281,45 @@ func (m *CurrencyConverterModule) generateConversionResult(
 			formattedConvertedAmount, targetCurrency)
 	}
 
-	subTitleBase := fmt.Sprintf("1 %s = %s %s", req.FromCurrency, formatRate(rate), targetCurrency)
-	var subTitleExtra string
-	if sourceName == "Bybit P2P" && p2pDetails != nil {
-		// subTitleExtra = fmt.Sprintf(" (Bybit P2P: @%s, Avail: %s-%s %s)", p2pDetails.NickName, p2pDetails.MinAmount, p2pDetails.MaxAmount, bybitP2PFixedCurrencyID)
-	} else if sourceName == "API" && rateDate != "" {
-		// subTitleExtra = fmt.Sprintf(" (Rate from %s)", rateDate)
+	// Invert subtitle for specific pairs for better readability
+	var subTitle string
+	lookupKey := fmt.Sprintf("%s_%s", req.FromCurrency, targetCurrency)
+	if _, shouldInvert := m.invertedRatePairs[lookupKey]; shouldInvert && displayRate > 0 {
+		invertedRate := 1 / displayRate
+		subTitle = fmt.Sprintf("1 %s = %s %s · %s", targetCurrency, formatRate(invertedRate), req.FromCurrency, sourceName)
+	} else {
+		subTitle = fmt.Sprintf("1 %s = %s %s · %s", req.FromCurrency, formatRate(displayRate), targetCurrency, sourceName)
 	}
-	subTitle := subTitleBase + subTitleExtra
 
-	clipboardText := formattedConvertedAmount
-	if ac.Thousand != "" {
-		clipboardText = strings.ReplaceAll(formattedConvertedAmount, ac.Thousand, "")
+	if sourceName == "Whitebird" {
+		// subTitle = fmt.Sprintf("Effective rate via %s: 1 %s ≈ %s %s", sourceName, req.FromCurrency, formatRate(displayRate), targetCurrency)
 	}
+
+	// MODIFIED: Use specific precision for clipboard text based on currency type.
+	precision, isHighPrecision := highPrecisionCurrencies[targetCurrency]
+	if !isHighPrecision {
+		precision = 2 // Default to 2 decimal places for standard currencies.
+	}
+	clipboardText := strconv.FormatFloat(finalAmount, 'f', precision, 64)
 
 	return &commontypes.FlowResult{
 		Title:    title,
 		SubTitle: subTitle,
-		Score:    currentScore,
+		Score:    score,
 		JsonRPCAction: commontypes.JsonRPCAction{
 			Method:     "copy_to_clipboard",
 			Parameters: []interface{}{clipboardText},
 		},
-	}, nil
+	}
 }
 
 // formatRate formats the exchange rate with appropriate precision.
 func formatRate(rate float64) string {
-	if rate == 0 {
+	if rate <= 0 { // MODIFIED: handle zero or negative rates cleanly
 		return "0"
 	}
 	var formattedRate string
-	if rate < 0.00000001 && rate > 0 {
+	if rate < 0.00000001 {
 		formattedRate = strconv.FormatFloat(rate, 'f', 10, 64)
 	} else if rate < 0.0001 {
 		formattedRate = strconv.FormatFloat(rate, 'f', 8, 64)

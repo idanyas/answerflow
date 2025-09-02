@@ -18,6 +18,7 @@ type ConversionRequest struct {
 
 func normalizeNumberString(s string) string {
 	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, " ", "") // Handle non-breaking spaces
 
 	dotIdx := strings.LastIndex(s, ".")
 	commaIdx := strings.LastIndex(s, ",")
@@ -63,12 +64,12 @@ func normalizeAndParseNumber(amountStr string) (float64, error) {
 }
 
 var (
-	// Regex for amount part: \d[\d\s,\.]*(?:[km]\b)?
-	// \d[\d\s,\.]*      -> matches the number, possibly with spaces, dots, commas
-	// (?:[km]\b)?       -> optionally matches 'k' or 'm' (kilo/million)
-	//                     IF it's followed by a word boundary (e.g., space, end of string, punctuation).
-	//                     This prevents 'k' in 'kzt' from being consumed as 'kilo'.
-	amountRegexPart             = `\d[\d\s,\.]*(?:[km]\b)?`
+	// Regex for amount part: \d[\d\s ,\.]*(?:[km]\b)?
+	// \d[\d\s ,\.]*      -> matches the number, possibly with spaces (standard and non-breaking), dots, commas
+	// (?:[km]\b)?        -> optionally matches 'k' or 'm' (kilo/million)
+	//                      IF it's followed by a word boundary (e.g., space, end of string, punctuation).
+	//                      This prevents 'k' in 'kzt' from being consumed as 'kilo'.
+	amountRegexPart             = `\d[\d\s ,\.]*(?:[km]\b)?`
 	symbolAndAmountRegexPart    = `(?:[$€₽¥£]|US\$|A\$|C\$|NZ\$|HK\$|S\$|CN¥|TL|zł|zl|kr|NOK|DKK|฿|R|₫|₩)?\s*` + amountRegexPart
 	currencyTokenRegexPart      = `(?:[a-zA-Z]{1,10}|[$€₽¥£]|US\$|A\$|C\$|NZ\$|HK\$|S\$|CN¥|TL|zł|zl|kr|NOK|DKK|฿|R|₫|₩)` // Generic currency token
 	currencyCodeStrictRegexPart = `[a-zA-Z]{3,10}`                                                                        // Stricter for currency codes

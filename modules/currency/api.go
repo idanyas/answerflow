@@ -1,4 +1,4 @@
-package currency // UPDATED package declaration
+package currency
 
 import (
 	"bytes"
@@ -8,407 +8,370 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/patrickmn/go-cache"
 )
 
 const (
-	allCurrenciesURL = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies.json"
-	ratesBaseURL     = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/%s.json" // %s is lowercase base currency
-	apiTimeout       = 4 * time.Second
+	// Default provider constants
+	allCurrenciesURL    = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies.json"
+	ratesBaseURL        = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/%s.json" // %s is lowercase base currency
+	defaultAPITimeout   = 10 * time.Second
+	backgroundUpdateTTL = 30 * time.Minute
 
-	// Bybit P2P constants
-	bybitP2PAPIURL          = "https://api2.bybit.com/fiat/otc/item/online"
-	bybitP2PRequestAmount   = "2000" // Fixed RUB amount for querying suitable offers
-	bybitP2PFixedTokenID    = "USDT"
-	bybitP2PFixedCurrencyID = "RUB"
-	bybitP2PTTL             = 5 * time.Minute
-	bybitP2PClientTimeout   = 10 * time.Second // Bybit might be slower
+	// Whitebird provider constants
+	whitebirdAPIURL     = "https://admin-service.whitebird.io/api/v1/exchange/calculation"
+	whitebirdAPITimeout = 15 * time.Second
 )
 
 // AllCurrenciesResponse maps currency codes (e.g., "usd") to their full names (e.g., "US Dollar").
 type AllCurrenciesResponse map[string]string
 
-// RatesAPIResponse represents the structure for caching fetched rates.
-// It's not directly the JSON structure but what we store after processing.
+// RatesAPIResponse represents the structure for caching fetched rates from the default provider.
 type RatesAPIResponse struct {
-	Date  string             `json:"date"`  // Date of the rates
-	Rates map[string]float64 `json:"rates"` // Map of target currency (lowercase) to rate against base
+	Date  string             `json:"date"`
+	Rates map[string]float64 `json:"rates"`
 }
 
-// BybitP2PItem represents a single offer item from the Bybit P2P API.
-type BybitP2PItem struct {
-	ID           string   `json:"id"`
-	NickName     string   `json:"nickName"`
-	Price        string   `json:"price"`        // Price in currencyId (e.g., RUB) for 1 unit of tokenId (e.g., USDT)
-	MinAmount    string   `json:"minAmount"`    // In currencyId (RUB)
-	MaxAmount    string   `json:"maxAmount"`    // In currencyId (RUB)
-	LastQuantity string   `json:"lastQuantity"` // Remaining quantity in tokenId (USDT)
-	IsOnline     bool     `json:"isOnline"`
-	Payments     []string `json:"payments"`
-	CurrencyId   string   `json:"currencyId"` // e.g., "RUB"
-	TokenId      string   `json:"tokenId"`    // e.g., "USDT"
-
-	// Processed fields, not from JSON
-	PriceFloat     float64
-	MinAmountFloat float64
-	MaxAmountFloat float64
+// --- Whitebird API specific structs ---
+type whitebirdRequestPayload struct {
+	PromoCode    string                `json:"promoCode"`
+	CurrencyPair whitebirdCurrencyPair `json:"currencyPair"`
+	Calculation  whitebirdCalculation  `json:"calculation"`
+	PaymentInfo  whitebirdPaymentInfo  `json:"paymentInfo"`
 }
 
-// BybitP2PResult holds the list of items from the Bybit P2P API.
-type BybitP2PResult struct {
-	Count int            `json:"count"`
-	Items []BybitP2PItem `json:"items"`
+type whitebirdCurrencyPair struct {
+	FromCurrency string `json:"fromCurrency"`
+	ToCurrency   string `json:"toCurrency"`
 }
 
-// BybitP2PResponse is the top-level structure for the Bybit P2P API response.
-type BybitP2PResponse struct {
-	RetCode int            `json:"ret_code"`
-	RetMsg  string         `json:"ret_msg"`
-	Result  BybitP2PResult `json:"result"`
-	TimeNow string         `json:"time_now"`
+type whitebirdCalculation struct {
+	InputAsset float64 `json:"inputAsset"`
 }
 
+type whitebirdPaymentInfo struct {
+	PaymentToken string `json:"paymentToken"`
+}
+
+type whitebirdResponse struct {
+	Rate struct {
+		PlainRatio string `json:"plainRatio"`
+	} `json:"rate"`
+}
+
+// APICache holds all currency and rate data, updated by background processes.
 type APICache struct {
-	client          *http.Client
-	bybitP2PClient  *http.Client // Separate client for Bybit with potentially different timeout
-	ratesCache      *cache.Cache // Stores RatesAPIResponse, keyed by "rates_<lowercase_base_currency>"
-	allCurrsCache   *cache.Cache // Stores AllCurrenciesResponse, keyed by "all_currencies"
-	bybitCache      *cache.Cache // Stores *BybitP2PItem, keyed by "bybit_p2p_offer_USDT_RUB_side<0_or_1>"
-	fetchLocks      sync.Map     // key: string (cacheKey), value: *sync.Mutex
-	defaultRatesTTL time.Duration
-	defaultAllTTL   time.Duration
+	client *http.Client
+	mu     sync.RWMutex // Protects all maps within this struct
+
+	// Cache for default provider
+	allCurrencies AllCurrenciesResponse
+	defaultRates  map[string]*RatesAPIResponse // Key: lowercase base currency
+
+	// Cache for Whitebird provider
+	whitebirdRates map[string]float64 // Key: e.g., "RUB_USDT"
 }
 
-func NewAPICache(ratesTTL, allCurrsTTL time.Duration) *APICache {
+// NewAPICache initializes a new cache. Data is initially empty.
+func NewAPICache() *APICache {
 	return &APICache{
-		client: &http.Client{
-			Timeout: apiTimeout,
-		},
-		bybitP2PClient: &http.Client{
-			Timeout: bybitP2PClientTimeout,
-		},
-		ratesCache:      cache.New(ratesTTL, ratesTTL*2),       // Default expiration, cleanup interval
-		allCurrsCache:   cache.New(allCurrsTTL, allCurrsTTL*2), // Default expiration, cleanup interval
-		bybitCache:      cache.New(bybitP2PTTL, bybitP2PTTL*2), // Cache for Bybit P2P offers
-		defaultRatesTTL: ratesTTL,
-		defaultAllTTL:   allCurrsTTL,
+		client:         &http.Client{Timeout: defaultAPITimeout},
+		allCurrencies:  make(AllCurrenciesResponse),
+		defaultRates:   make(map[string]*RatesAPIResponse),
+		whitebirdRates: make(map[string]float64),
 	}
 }
 
-func (ac *APICache) getLock(key string) *sync.Mutex {
-	lock, _ := ac.fetchLocks.LoadOrStore(key, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+// StartBackgroundUpdaters launches goroutines that will periodically refresh the cache.
+func (ac *APICache) StartBackgroundUpdaters() {
+	log.Println("Starting background currency updaters...")
+	go ac.updateDefaultProviderLoop()
+	go ac.updateWhitebirdRatesLoop()
 }
 
-func (ac *APICache) GetAllCurrencies(ctx context.Context) (AllCurrenciesResponse, error) {
-	cacheKey := "all_currencies"
-	if data, found := ac.allCurrsCache.Get(cacheKey); found {
-		return data.(AllCurrenciesResponse), nil
+// --- Background Update Loops ---
+
+func (ac *APICache) updateDefaultProviderLoop() {
+	ticker := time.NewTicker(backgroundUpdateTTL)
+	defer ticker.Stop()
+
+	// Initial fetch on startup
+	if err := ac.fetchDefaultProviderData(); err != nil {
+		log.Printf("ERROR: Initial fetch for default provider failed: %v", err)
 	}
 
-	lock := ac.getLock(cacheKey)
-	lock.Lock()
-	defer func() {
-		lock.Unlock()
-		ac.fetchLocks.Delete(cacheKey) // Clean up lock after fetch attempt
-	}()
+	for range ticker.C {
+		if err := ac.fetchDefaultProviderData(); err != nil {
+			log.Printf("ERROR: Background update for default provider failed: %v", err)
+		}
+	}
+}
 
-	// Double-check cache after acquiring lock
-	if data, found := ac.allCurrsCache.Get(cacheKey); found {
-		return data.(AllCurrenciesResponse), nil
+func (ac *APICache) updateWhitebirdRatesLoop() {
+	ticker := time.NewTicker(backgroundUpdateTTL)
+	defer ticker.Stop()
+
+	// Initial fetch on startup
+	if err := ac.fetchWhitebirdRates(); err != nil {
+		log.Printf("ERROR: Initial fetch for Whitebird provider failed: %v", err)
 	}
 
+	for range ticker.C {
+		if err := ac.fetchWhitebirdRates(); err != nil {
+			log.Printf("ERROR: Background update for Whitebird provider failed: %v", err)
+		}
+	}
+}
+
+// --- Data Fetching Logic ---
+
+func (ac *APICache) fetchDefaultProviderData() error {
+	log.Println("Fetching default provider data...")
+	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout*2)
+	defer cancel()
+
+	// 1. Fetch all currencies list
 	req, err := http.NewRequestWithContext(ctx, "GET", allCurrenciesURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request for all currencies: %w", err)
+		return fmt.Errorf("creating request for all currencies: %w", err)
 	}
-
 	resp, err := ac.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching all currencies: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("all currencies API returned status %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
+		return fmt.Errorf("fetching all currencies: %w", err)
 	}
 
-	var currencies AllCurrenciesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&currencies); err != nil {
-		return nil, fmt.Errorf("decoding all currencies response: %w", err)
+	var fetchedCurrencies AllCurrenciesResponse
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&fetchedCurrencies); err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("decoding all currencies response: %w", err)
+		}
+	} else {
+		status := resp.Status
+		resp.Body.Close()
+		return fmt.Errorf("all currencies API returned non-200 status: %s", status)
+	}
+	resp.Body.Close()
+
+	// 2. Fetch rates for a set of important base currencies
+	// This ensures we have common conversions readily available.
+	baseCurrenciesToFetch := []string{"usd", "eur", "rub", "kzt", "byn", "usdt"} // ADDED "usdt"
+	fetchedRates := make(map[string]*RatesAPIResponse)
+
+	for _, base := range baseCurrenciesToFetch {
+		ratesResp, err := ac.fetchRatesForBase(ctx, base)
+		if err != nil {
+			log.Printf("Warning: Failed to fetch rates for base '%s': %v. Skipping.", base, err)
+			continue
+		}
+		fetchedRates[base] = ratesResp
+		time.Sleep(200 * time.Millisecond) // Be nice to the API
 	}
 
-	ac.allCurrsCache.Set(cacheKey, currencies, ac.defaultAllTTL)
-	return currencies, nil
+	// 3. Lock and update the cache
+	ac.mu.Lock()
+	ac.allCurrencies = fetchedCurrencies
+	for base, rates := range fetchedRates {
+		ac.defaultRates[base] = rates
+	}
+	ac.mu.Unlock()
+
+	log.Println("Default provider data updated successfully.")
+	return nil
 }
 
-// GetRates fetches exchange rates for a given base currency (e.g., "usd").
-// It returns the processed rates data (date and map of target currency to rate).
-func (ac *APICache) GetRates(ctx context.Context, baseCurrency string) (*RatesAPIResponse, error) {
-	baseCurrency = strings.ToLower(baseCurrency) // API uses lowercase base currency in URL and keys
-	cacheKey := "rates_" + baseCurrency
-
-	if data, found := ac.ratesCache.Get(cacheKey); found {
-		return data.(*RatesAPIResponse), nil
-	}
-
-	lock := ac.getLock(cacheKey)
-	lock.Lock()
-	defer func() {
-		lock.Unlock()
-		ac.fetchLocks.Delete(cacheKey) // Clean up lock
-	}()
-
-	if data, found := ac.ratesCache.Get(cacheKey); found {
-		return data.(*RatesAPIResponse), nil
-	}
-
+func (ac *APICache) fetchRatesForBase(ctx context.Context, baseCurrency string) (*RatesAPIResponse, error) {
 	url := fmt.Sprintf(ratesBaseURL, baseCurrency)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request for rates of %s: %w", baseCurrency, err)
+		return nil, err
 	}
 
 	resp, err := ac.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetching rates for %s from %s: %w", baseCurrency, url, err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, errRead := io.ReadAll(resp.Body)
-	if errRead != nil {
-		// Error reading response body is serious, but we'll let the JSON decoder try if bodyBytes has content
-	}
-	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Re-wrap for decoder
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("rates API for %s (%s) returned status %d (%s)", baseCurrency, url, resp.StatusCode, http.StatusText(resp.StatusCode))
+		return nil, fmt.Errorf("API returned status %s", resp.Status)
 	}
 
+	bodyBytes, _ := io.ReadAll(resp.Body)
 	var tempResp map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&tempResp); err != nil {
-		// If decoding fails, include part of the body for context if possible
-		bodyStr := string(bodyBytes)
-		if len(bodyStr) > 200 { // Limit length of body in error
-			bodyStr = bodyStr[:200] + "..."
-		}
-		return nil, fmt.Errorf("decoding rates response for %s from %s (body: '%s'): %w", baseCurrency, url, bodyStr, err)
+	if err := json.Unmarshal(bodyBytes, &tempResp); err != nil {
+		return nil, fmt.Errorf("decoding rates response: %w", err)
 	}
 
-	date, ok := tempResp["date"].(string)
+	date, _ := tempResp["date"].(string)
+	ratesMapInterface, ok := tempResp[baseCurrency].(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("date field missing or not a string in rates response for %s from %s", baseCurrency, url)
-	}
-
-	var ratesMapInterface map[string]interface{}
-	if val, found := tempResp[baseCurrency]; found {
-		ratesMapInterface, ok = val.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("rates data for base '%s' is not a map in response from %s", baseCurrency, url)
-		}
-	} else {
-		foundKey := false
-		for apiKey, apiValue := range tempResp {
-			if strings.ToLower(apiKey) == baseCurrency && apiKey != "date" {
-				if actualMap, okInner := apiValue.(map[string]interface{}); okInner {
-					ratesMapInterface = actualMap
-					foundKey = true
-					log.Printf("Found rates for '%s' under API key '%s' (case mismatch) from %s", baseCurrency, apiKey, url)
-					break
-				}
-			}
-		}
-		if !foundKey {
-			return nil, fmt.Errorf("base currency key '%s' not found in rates response map from %s", baseCurrency, url)
-		}
+		return nil, fmt.Errorf("base currency key '%s' not found in rates response", baseCurrency)
 	}
 
 	finalRates := make(map[string]float64)
-	for targetCurrencyAPI, rateInterface := range ratesMapInterface {
-		targetCurrency := strings.ToLower(targetCurrencyAPI)
+	for target, rateInterface := range ratesMapInterface {
 		if rate, ok := rateInterface.(float64); ok {
-			finalRates[targetCurrency] = rate
-		} else {
-			if rateStr, okStr := rateInterface.(string); okStr {
-				if parsedRate, errParse := strconv.ParseFloat(rateStr, 64); errParse == nil {
-					finalRates[targetCurrency] = parsedRate
-				} else {
-					log.Printf("Warning: rate for target %s (from base %s) is not a float64 and not a parsable string: %T, %v. Parse error: %v. URL: %s", targetCurrency, baseCurrency, rateInterface, rateInterface, errParse, url)
-				}
-			} else {
-				log.Printf("Warning: rate for target %s (from base %s) is not a float64 or string: %T, %v. URL: %s", targetCurrency, baseCurrency, rateInterface, rateInterface, url)
-			}
+			finalRates[strings.ToLower(target)] = rate
 		}
 	}
 
-	ratesAPIResponse := &RatesAPIResponse{
-		Date:  date,
-		Rates: finalRates,
-	}
-
-	ac.ratesCache.Set(cacheKey, ratesAPIResponse, ac.defaultRatesTTL)
-	return ratesAPIResponse, nil
+	return &RatesAPIResponse{Date: date, Rates: finalRates}, nil
 }
 
-// GetConversionRate returns the rate for 1 unit of fromCurrency to toCurrency, and the date of the rate.
-func (ac *APICache) GetConversionRate(ctx context.Context, fromCurrency, toCurrency string) (float64, string, error) {
-	lcFromCurrency := strings.ToLower(fromCurrency)
-	lcToCurrency := strings.ToLower(toCurrency)
+func (ac *APICache) fetchWhitebirdRates() error {
+	log.Println("Fetching Whitebird provider rates...")
+	ctx, cancel := context.WithTimeout(context.Background(), whitebirdAPITimeout)
+	defer cancel()
 
-	if lcFromCurrency == lcToCurrency {
-		return 1.0, time.Now().Format("2006-01-02"), nil // Rate is 1 for same currency
+	pairs := []struct{ from, to, fromAPI, toAPI string }{
+		{"RUB", "USDT", "RUB", "USDT_TON"},
+		{"USDT", "RUB", "USDT_TON", "RUB"},
+		{"BYN", "USDT", "BYN", "USDT_TON"},
 	}
 
-	ratesResp, err := ac.GetRates(ctx, lcFromCurrency)
-	if err != nil {
-		return 0, "", fmt.Errorf("getting rates for base %s when converting to %s: %w", lcFromCurrency, lcToCurrency, err)
-	}
+	fetchedRates := make(map[string]float64)
 
-	rate, ok := ratesResp.Rates[lcToCurrency]
-	if !ok {
-		// Provide more context if a rate is not found
-		availableTargets := make([]string, 0, len(ratesResp.Rates))
-		for k := range ratesResp.Rates {
-			availableTargets = append(availableTargets, k)
+	for _, pair := range pairs {
+		rate, err := ac.fetchSingleWhitebirdRate(ctx, pair.fromAPI, pair.toAPI)
+		if err != nil {
+			// Log the error but continue; a partial update is better than none.
+			log.Printf("Warning: Failed to fetch Whitebird rate for %s->%s: %v", pair.from, pair.to, err)
+			continue
 		}
-		sort.Strings(availableTargets) // Sort for consistent logging
-		log.Printf("Target currency '%s' not found in rates for base '%s'. Date: %s. Available targets (%d): %v", lcToCurrency, lcFromCurrency, ratesResp.Date, len(ratesResp.Rates), availableTargets)
-		return 0, "", fmt.Errorf("conversion rate from %s to %s not found directly. Check API for '%s' base", lcFromCurrency, lcToCurrency, lcFromCurrency)
+		cacheKey := fmt.Sprintf("%s_%s", pair.from, pair.to)
+		fetchedRates[cacheKey] = rate
+		time.Sleep(200 * time.Millisecond) // Be nice to the API
+	}
+
+	if len(fetchedRates) == 0 {
+		return fmt.Errorf("all Whitebird rate fetches failed")
+	}
+
+	// Lock and update the cache
+	ac.mu.Lock()
+	for key, rate := range fetchedRates {
+		ac.whitebirdRates[key] = rate
+	}
+	ac.mu.Unlock()
+
+	log.Println("Whitebird provider rates updated successfully.")
+	return nil
+}
+
+func (ac *APICache) fetchSingleWhitebirdRate(ctx context.Context, from, to string) (float64, error) {
+	payload := whitebirdRequestPayload{
+		PromoCode: "",
+		CurrencyPair: whitebirdCurrencyPair{
+			FromCurrency: from,
+			ToCurrency:   to,
+		},
+		Calculation: whitebirdCalculation{InputAsset: 1},
+		PaymentInfo: whitebirdPaymentInfo{PaymentToken: ""},
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling Whitebird payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", whitebirdAPIURL, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return 0, fmt.Errorf("creating Whitebird request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := ac.client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("executing Whitebird request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("API returned non-200 status: %s", resp.Status)
+	}
+
+	var wbResp whitebirdResponse
+	if err := json.NewDecoder(resp.Body).Decode(&wbResp); err != nil {
+		return 0, fmt.Errorf("decoding Whitebird response: %w", err)
+	}
+
+	rate, err := strconv.ParseFloat(wbResp.Rate.PlainRatio, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing Whitebird rate '%s': %w", wbResp.Rate.PlainRatio, err)
+	}
+
+	return rate, nil
+}
+
+// --- Public Cache Accessors ---
+
+// GetAllCurrencies retrieves the map of all known currencies from the cache.
+func (ac *APICache) GetAllCurrencies() (AllCurrenciesResponse, error) {
+	ac.mu.RLock()
+	defer ac.mu.RUnlock()
+	if len(ac.allCurrencies) == 0 {
+		return nil, fmt.Errorf("currency list not yet available in cache")
+	}
+	// Return a copy to prevent race conditions on the caller's side
+	dataCopy := make(AllCurrenciesResponse, len(ac.allCurrencies))
+	for k, v := range ac.allCurrencies {
+		dataCopy[k] = v
+	}
+	return dataCopy, nil
+}
+
+// GetConversionRate returns the rate for 1 unit of fromCurrency to toCurrency from the default provider.
+func (ac *APICache) GetConversionRate(fromCurrency, toCurrency string) (float64, string, error) {
+	lcFrom := strings.ToLower(fromCurrency)
+	lcTo := strings.ToLower(toCurrency)
+
+	if lcFrom == lcTo {
+		return 1.0, time.Now().Format("2006-01-02"), nil
+	}
+
+	ac.mu.RLock()
+	defer ac.mu.RUnlock()
+
+	ratesResp, ok := ac.defaultRates[lcFrom]
+	if !ok {
+		return 0, "", fmt.Errorf("base currency '%s' not available in cache", fromCurrency)
+	}
+
+	rate, ok := ratesResp.Rates[lcTo]
+	if !ok {
+		return 0, "", fmt.Errorf("target currency '%s' not found for base '%s'", toCurrency, fromCurrency)
 	}
 
 	return rate, ratesResp.Date, nil
 }
 
-// GetBybitP2PBestOffer fetches the best P2P offer from Bybit for USDT/RUB.
-// side: "0" for SELL USDT (user sells USDT, gets RUB), "1" for BUY USDT (user buys USDT, pays RUB).
-// This function expects tokenId to be "USDT" and currencyId to be "RUB" as per current requirements.
-func (ac *APICache) GetBybitP2PBestOffer(ctx context.Context, side string) (*BybitP2PItem, error) {
-	tokenId := bybitP2PFixedTokenID
-	currencyId := bybitP2PFixedCurrencyID
-	cacheKey := fmt.Sprintf("bybit_p2p_offer_%s_%s_side%s", tokenId, currencyId, side)
+// GetWhitebirdRate retrieves a pre-fetched raw rate from the Whitebird provider.
+func (ac *APICache) GetWhitebirdRate(fromCurrency, toCurrency string) (float64, error) {
+	cacheKey := fmt.Sprintf("%s_%s", fromCurrency, toCurrency)
+	ac.mu.RLock()
+	defer ac.mu.RUnlock()
 
-	if data, found := ac.bybitCache.Get(cacheKey); found {
-		if item, ok := data.(*BybitP2PItem); ok {
-			return item, nil
-		}
-		log.Printf("Warning: Found data in Bybit cache for key %s, but it's not *BybitP2PItem", cacheKey)
+	rate, ok := ac.whitebirdRates[cacheKey]
+	if !ok {
+		return 0, fmt.Errorf("whitebird rate for %s to %s not available in cache", fromCurrency, toCurrency)
 	}
-
-	lock := ac.getLock(cacheKey)
-	lock.Lock()
-	defer func() {
-		lock.Unlock()
-		ac.fetchLocks.Delete(cacheKey)
-	}()
-
-	if data, found := ac.bybitCache.Get(cacheKey); found {
-		if item, ok := data.(*BybitP2PItem); ok {
-			return item, nil
-		}
-	}
-
-	payloadMap := map[string]interface{}{
-		"userId":             "",
-		"tokenId":            tokenId,
-		"currencyId":         currencyId,
-		"payment":            []string{"626", "382", "27", "383", "657"}, // Fixed as per instruction
-		"side":               side,
-		"size":               "10", // Fetch a few offers
-		"page":               "1",
-		"amount":             bybitP2PRequestAmount, // Fixed amount to filter relevant offers
-		"vaMaker":            false,
-		"bulkMaker":          false,
-		"canTrade":           true,
-		"verificationFilter": 2,
-		"sortType":           "TRADE_PRICE", // Bybit sorts: side "1" (buy) -> price asc; side "0" (sell) -> price desc
-		"paymentPeriod":      []interface{}{},
-		"itemRegion":         1,
-	}
-	payloadBytes, err := json.Marshal(payloadMap)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling Bybit P2P request payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", bybitP2PAPIURL, bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return nil, fmt.Errorf("creating Bybit P2P request: %w", err)
-	}
-
-	// Set headers as per cURL example
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:139.0) Gecko/20100101 Firefox/139.0")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Referer", "https://www.bybit.com/")
-	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("Origin", "https://www.bybit.com")
-	req.Header.Set("Alt-Used", "api2.bybit.com")
-
-	resp, err := ac.bybitP2PClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("executing Bybit P2P request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bybit P2P API returned status %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
-
-	var bybitResp BybitP2PResponse
-	if err := json.NewDecoder(resp.Body).Decode(&bybitResp); err != nil {
-		return nil, fmt.Errorf("decoding Bybit P2P response: %w", err)
-	}
-
-	if bybitResp.RetCode != 0 {
-		return nil, fmt.Errorf("bybit P2P API error: %s (code %d)", bybitResp.RetMsg, bybitResp.RetCode)
-	}
-
-	fixedAmountFloat, _ := strconv.ParseFloat(bybitP2PRequestAmount, 64)
-
-	for i := range bybitResp.Result.Items {
-		item := &bybitResp.Result.Items[i] // Get pointer to modify
-
-		if !item.IsOnline || item.TokenId != tokenId || item.CurrencyId != currencyId {
-			continue
-		}
-
-		priceF, err1 := strconv.ParseFloat(item.Price, 64)
-		minAmountF, err2 := strconv.ParseFloat(item.MinAmount, 64)
-		maxAmountF, err3 := strconv.ParseFloat(item.MaxAmount, 64)
-
-		if err1 != nil || err2 != nil || err3 != nil {
-			log.Printf("Warning: Could not parse numeric fields for Bybit offer ID %s: %v, %v, %v", item.ID, err1, err2, err3)
-			continue
-		}
-		item.PriceFloat = priceF
-		item.MinAmountFloat = minAmountF
-		item.MaxAmountFloat = maxAmountF
-
-		// Check if the fixed request amount (2000 RUB) is within the offer's limits
-		if fixedAmountFloat >= minAmountF && fixedAmountFloat <= maxAmountF && priceF > 0 {
-			// Due to "sortType":"TRADE_PRICE", the first valid item is the best.
-			ac.bybitCache.Set(cacheKey, item, bybitP2PTTL)
-			return item, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no suitable Bybit P2P offer found for side %s, token %s, currency %s with amount %s", side, tokenId, currencyId, bybitP2PRequestAmount)
+	return rate, nil
 }
 
-// SortBybitP2PItems sorts items based on price.
-// For side "1" (BUY USDT), ascending price is better.
-// For side "0" (SELL USDT), descending price is better.
-// This function is DEPRECATED if Bybit's sortType:"TRADE_PRICE" is reliable.
-func SortBybitP2PItems(items []BybitP2PItem, side string) {
-	sort.SliceStable(items, func(i, j int) bool {
-		if side == "1" { // BUY USDT, want lower price
-			return items[i].PriceFloat < items[j].PriceFloat
-		}
-		// SELL USDT, want higher price
-		return items[i].PriceFloat > items[j].PriceFloat
-	})
+// DEPRECATED: GetRates is kept for compatibility in case any part of the code still uses it,
+// but GetConversionRate is the preferred method for external use.
+func (ac *APICache) GetRates(ctx context.Context, baseCurrency string) (*RatesAPIResponse, error) {
+	baseCurrency = strings.ToLower(baseCurrency)
+	ac.mu.RLock()
+	defer ac.mu.RUnlock()
+
+	ratesResp, ok := ac.defaultRates[baseCurrency]
+	if !ok {
+		return nil, fmt.Errorf("rates for base '%s' not available in cache", baseCurrency)
+	}
+	return ratesResp, nil
 }
