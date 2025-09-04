@@ -244,7 +244,7 @@ func (m *CurrencyConverterModule) generateConversionResult(
 			effectiveRate = finalAmount / req.Amount
 		}
 		// Pass the original targetCurrency for display purposes.
-		return m.formatResult(req, targetCurrency, finalAmount, effectiveRate, scoreWhitebird, "Whitebird", ac), nil
+		return m.formatResult(req, targetCurrency, finalAmount, effectiveRate, scoreWhitebird, "Blackanimal", ac), nil
 	}
 	// --- End Whitebird Provider Logic ---
 
@@ -286,9 +286,10 @@ func (m *CurrencyConverterModule) formatResult(
 	lookupKey := fmt.Sprintf("%s_%s", req.FromCurrency, targetCurrency)
 	if _, shouldInvert := m.invertedRatePairs[lookupKey]; shouldInvert && displayRate > 0 {
 		invertedRate := 1 / displayRate
-		subTitle = fmt.Sprintf("1 %s = %s %s · %s", targetCurrency, formatRate(invertedRate), req.FromCurrency, sourceName)
+		// subTitle = fmt.Sprintf("1 %s = %s %s · %s", targetCurrency, formatRate(invertedRate), req.FromCurrency, sourceName)
+		subTitle = fmt.Sprintf("1 %s = %s %s", targetCurrency, formatRate(invertedRate), req.FromCurrency)
 	} else {
-		subTitle = fmt.Sprintf("1 %s = %s %s · %s", req.FromCurrency, formatRate(displayRate), targetCurrency, sourceName)
+		subTitle = fmt.Sprintf("1 %s = %s %s", req.FromCurrency, formatRate(displayRate), targetCurrency)
 	}
 
 	if sourceName == "Whitebird" {
