@@ -32,6 +32,13 @@ var (
 func main() {
 	// Initialize the new proactive API cache
 	globalAPICache = currency.NewAPICache()
+	// Perform a blocking initial fetch to ensure data is ready before serving requests.
+	log.Println("Performing initial fetch of currency data...")
+	if err := globalAPICache.InitialFetch(); err != nil {
+		log.Fatalf("Failed to perform initial data fetch: %v", err)
+	}
+	log.Println("Initial data fetch complete.")
+
 	// Start the background processes to keep the cache updated
 	globalAPICache.StartBackgroundUpdaters()
 

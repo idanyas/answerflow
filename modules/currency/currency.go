@@ -22,9 +22,8 @@ const (
 
 // highPrecisionCurrencies defines currencies that need more than 2 decimal places for clipboard operations.
 var highPrecisionCurrencies = map[string]int{
-	"BTC":  8,
-	"ETH":  8,
-	"USDT": 6, // Often traded to more than 2 decimal places
+	"BTC": 8,
+	"ETH": 8,
 }
 
 // CurrencyConverterModule handles currency conversion queries.
@@ -103,7 +102,6 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 	// --- End Alias Logic ---
 
 	var results []commontypes.FlowResult
-	ac := accounting.Accounting{Precision: 2}
 
 	if parsedRequest.ToCurrency != "" {
 		// User specified a target currency
@@ -118,7 +116,7 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 			return nil, nil // Avoid converting to itself
 		}
 
-		res, errGen := m.generateConversionResult(ctx, parsedRequest, parsedRequest.ToCurrency, apiCache, scoreSpecificConversion, ac)
+		res, errGen := m.generateConversionResult(ctx, parsedRequest, parsedRequest.ToCurrency, apiCache, scoreSpecificConversion)
 		if errGen != nil {
 			log.Printf("CurrencyConverterModule: Error generating specific conversion for %s to %s: %v", parsedRequest.FromCurrency, parsedRequest.ToCurrency, errGen)
 		} else if res != nil {
@@ -132,7 +130,7 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 		if m.baseConversionCurrency != "" &&
 			m.baseConversionCurrency != parsedRequest.FromCurrency &&
 			!handledTargets[m.baseConversionCurrency] {
-			res, errGen := m.generateConversionResult(ctx, parsedRequest, m.baseConversionCurrency, apiCache, scoreBaseConversion, ac)
+			res, errGen := m.generateConversionResult(ctx, parsedRequest, m.baseConversionCurrency, apiCache, scoreBaseConversion)
 			if errGen != nil {
 				log.Printf("CurrencyConverterModule: Error generating base conversion for %s to %s: %v", parsedRequest.FromCurrency, m.baseConversionCurrency, errGen)
 			} else if res != nil {
@@ -146,7 +144,7 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 			if target == parsedRequest.FromCurrency || handledTargets[target] {
 				continue
 			}
-			res, errGen := m.generateConversionResult(ctx, parsedRequest, target, apiCache, scoreQuickConversion, ac)
+			res, errGen := m.generateConversionResult(ctx, parsedRequest, target, apiCache, scoreQuickConversion)
 			if errGen != nil {
 				log.Printf("CurrencyConverterModule: Error generating quick conversion for %s to %s: %v", parsedRequest.FromCurrency, target, errGen)
 				continue
@@ -170,8 +168,7 @@ func (m *CurrencyConverterModule) generateConversionResult(
 	req *ConversionRequest,
 	targetCurrency string,
 	apiCache *APICache,
-	baseScore int,
-	ac accounting.Accounting) (*commontypes.FlowResult, error) {
+	baseScore int) (*commontypes.FlowResult, error) {
 
 	// ALIASING: Handle USD as an alias for USDT for the target currency.
 	effectiveTargetCurrency := targetCurrency
@@ -244,19 +241,19 @@ func (m *CurrencyConverterModule) generateConversionResult(
 			effectiveRate = finalAmount / req.Amount
 		}
 		// Pass the original targetCurrency for display purposes.
-		return m.formatResult(req, targetCurrency, finalAmount, effectiveRate, scoreWhitebird, "Blackanimal", ac), nil
+		return m.formatResult(req, targetCurrency, finalAmount, effectiveRate, scoreWhitebird, "Blackanimal"), nil
 	}
 	// --- End Whitebird Provider Logic ---
 
 	// --- Default Provider Fallback ---
 	// Use the aliased effectiveTargetCurrency for fetching the rate.
-	rate, _, err := apiCache.GetConversionRate(req.FromCurrency, effectiveTargetCurrency)
+	rate, _, err := apiCache.GetConversionRate(ctx, req.FromCurrency, effectiveTargetCurrency)
 	if err != nil {
 		return nil, fmt.Errorf("getting conversion rate from default provider: %w", err)
 	}
 	convertedAmount := req.Amount * rate
 	// Pass the original targetCurrency for display purposes.
-	return m.formatResult(req, targetCurrency, convertedAmount, rate, baseScore, "currency-api", ac), nil
+	return m.formatResult(req, targetCurrency, convertedAmount, rate, baseScore, "currency-api"), nil
 }
 
 // formatResult formats the final result into a FlowResult.
@@ -266,11 +263,23 @@ func (m *CurrencyConverterModule) formatResult(
 	finalAmount float64,
 	displayRate float64,
 	score int,
-	sourceName string,
-	ac accounting.Accounting) *commontypes.FlowResult {
+	sourceName string) *commontypes.FlowResult {
 
-	formattedInputAmount := ac.FormatMoneyFloat64(req.Amount)
-	formattedConvertedAmount := ac.FormatMoneyFloat64(finalAmount)
+	// Determine precision for the input currency
+	inputPrecision, isInputHighPrecision := highPrecisionCurrencies[req.FromCurrency]
+	if !isInputHighPrecision {
+		inputPrecision = 2
+	}
+	acInput := accounting.Accounting{Symbol: "", Precision: inputPrecision}
+	formattedInputAmount := acInput.FormatMoneyFloat64(req.Amount)
+
+	// Determine precision for the output currency (target)
+	outputPrecision, isOutputHighPrecision := highPrecisionCurrencies[targetCurrency]
+	if !isOutputHighPrecision {
+		outputPrecision = 2
+	}
+	acOutput := accounting.Accounting{Symbol: "", Precision: outputPrecision}
+	formattedConvertedAmount := acOutput.FormatMoneyFloat64(finalAmount)
 
 	var title string
 	if m.ShortDisplayFormat {
@@ -296,12 +305,8 @@ func (m *CurrencyConverterModule) formatResult(
 		// subTitle = fmt.Sprintf("Effective rate via %s: 1 %s ≈ %s %s", sourceName, req.FromCurrency, formatRate(displayRate), targetCurrency)
 	}
 
-	// MODIFIED: Use specific precision for clipboard text based on currency type.
-	precision, isHighPrecision := highPrecisionCurrencies[targetCurrency]
-	if !isHighPrecision {
-		precision = 2 // Default to 2 decimal places for standard currencies.
-	}
-	clipboardText := strconv.FormatFloat(finalAmount, 'f', precision, 64)
+	// Use the determined outputPrecision for the clipboard text.
+	clipboardText := strconv.FormatFloat(finalAmount, 'f', outputPrecision, 64)
 
 	return &commontypes.FlowResult{
 		Title:    title,

@@ -21,6 +21,14 @@ const (
 	defaultAPITimeout   = 10 * time.Second
 	backgroundUpdateTTL = 30 * time.Minute
 
+	// Exponential backoff constants for background updates
+	backoffInitialDelay = 2 * time.Second
+	backoffMaxDelay     = 1 * time.Minute
+	backoffMultiplier   = 2.0
+
+	// Worker pool size for fetching all rates
+	numFetchWorkers = 32
+
 	// Whitebird provider constants
 	whitebirdAPIURL     = "https://admin-service.whitebird.io/api/v1/exchange/calculation"
 	whitebirdAPITimeout = 15 * time.Second
@@ -85,6 +93,42 @@ func NewAPICache() *APICache {
 	}
 }
 
+// InitialFetch performs the initial synchronous data fetch.
+func (ac *APICache) InitialFetch() error {
+	var wg sync.WaitGroup
+	var errDefault, errWhitebird error
+
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		errDefault = ac.fetchDefaultProviderData()
+	}()
+
+	go func() {
+		defer wg.Done()
+		errWhitebird = ac.fetchWhitebirdRates()
+	}()
+
+	wg.Wait()
+
+	if errDefault != nil {
+		// Log as warning and continue, the app might still work for some pairs
+		log.Printf("Warning: initial default provider fetch failed: %v", errDefault)
+	}
+	if errWhitebird != nil {
+		// Log as warning and continue
+		log.Printf("Warning: initial Whitebird provider fetch failed: %v", errWhitebird)
+	}
+
+	// Only return fatal error if BOTH fail, or if default fails (as it's primary)
+	if errDefault != nil {
+		return fmt.Errorf("initial default provider fetch failed: %w", errDefault)
+	}
+
+	return nil
+}
+
 // StartBackgroundUpdaters launches goroutines that will periodically refresh the cache.
 func (ac *APICache) StartBackgroundUpdaters() {
 	log.Println("Starting background currency updaters...")
@@ -95,29 +139,31 @@ func (ac *APICache) StartBackgroundUpdaters() {
 // --- Background Update Loops ---
 
 func (ac *APICache) updateDefaultProviderLoop() {
-	ticker := time.NewTicker(backgroundUpdateTTL)
-	defer ticker.Stop()
+	currentDelay := backoffInitialDelay
 
-	// Initial fetch on startup
-	if err := ac.fetchDefaultProviderData(); err != nil {
-		log.Printf("ERROR: Initial fetch for default provider failed: %v", err)
-	}
-
-	for range ticker.C {
-		if err := ac.fetchDefaultProviderData(); err != nil {
-			log.Printf("ERROR: Background update for default provider failed: %v", err)
+	for {
+		err := ac.fetchDefaultProviderData()
+		if err != nil {
+			log.Printf("ERROR: Background update for default provider failed: %v. Retrying in %s.", err, currentDelay)
+			time.Sleep(currentDelay)
+			// Apply exponential backoff
+			currentDelay = time.Duration(float64(currentDelay) * backoffMultiplier)
+			if currentDelay > backoffMaxDelay {
+				currentDelay = backoffMaxDelay
+			}
+		} else {
+			// On success, reset delay and wait for the normal TTL
+			currentDelay = backoffInitialDelay
+			log.Printf("Default provider data updated successfully. Next update in %s.", backgroundUpdateTTL)
+			time.Sleep(backgroundUpdateTTL)
 		}
 	}
 }
 
 func (ac *APICache) updateWhitebirdRatesLoop() {
+	// This loop can remain simpler as it's less critical and makes fewer requests
 	ticker := time.NewTicker(backgroundUpdateTTL)
 	defer ticker.Stop()
-
-	// Initial fetch on startup
-	if err := ac.fetchWhitebirdRates(); err != nil {
-		log.Printf("ERROR: Initial fetch for Whitebird provider failed: %v", err)
-	}
 
 	for range ticker.C {
 		if err := ac.fetchWhitebirdRates(); err != nil {
@@ -129,11 +175,11 @@ func (ac *APICache) updateWhitebirdRatesLoop() {
 // --- Data Fetching Logic ---
 
 func (ac *APICache) fetchDefaultProviderData() error {
-	log.Println("Fetching default provider data...")
-	ctx, cancel := context.WithTimeout(context.Background(), defaultAPITimeout*2)
+	log.Println("Starting full fetch of all default provider data...")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*5) // Generous timeout for full fetch
 	defer cancel()
 
-	// 1. Fetch all currencies list
+	// 1. Fetch all currencies list to know which base rates to fetch
 	req, err := http.NewRequestWithContext(ctx, "GET", allCurrenciesURL, nil)
 	if err != nil {
 		return fmt.Errorf("creating request for all currencies: %w", err)
@@ -156,30 +202,66 @@ func (ac *APICache) fetchDefaultProviderData() error {
 	}
 	resp.Body.Close()
 
-	// 2. Fetch rates for a set of important base currencies
-	// This ensures we have common conversions readily available.
-	baseCurrenciesToFetch := []string{"usd", "eur", "rub", "kzt", "byn", "usdt"} // ADDED "usdt"
-	fetchedRates := make(map[string]*RatesAPIResponse)
+	if len(fetchedCurrencies) == 0 {
+		return fmt.Errorf("fetched currency list is empty, aborting rate fetch")
+	}
+
+	// 2. Concurrently fetch rates for ALL available base currencies using a worker pool
+	baseCurrenciesToFetch := make([]string, 0, len(fetchedCurrencies))
+	for code := range fetchedCurrencies {
+		baseCurrenciesToFetch = append(baseCurrenciesToFetch, code)
+	}
+
+	var wg sync.WaitGroup
+	jobs := make(chan string, len(baseCurrenciesToFetch))
+	results := make(chan *RatesAPIResponse, len(baseCurrenciesToFetch))
+
+	for w := 0; w < numFetchWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for base := range jobs {
+				ratesResp, err := ac.fetchRatesForBase(ctx, base)
+				if err != nil {
+					log.Printf("Warning: Failed to fetch rates for base '%s': %v. Skipping.", base, err)
+					continue
+				}
+				// Set the base currency on the response object for easier lookup later
+				ratesResp.Date = base // Overloading Date field to carry the base code
+				results <- ratesResp
+
+				time.Sleep(200 * time.Millisecond) // Be nice to the API
+			}
+		}()
+	}
 
 	for _, base := range baseCurrenciesToFetch {
-		ratesResp, err := ac.fetchRatesForBase(ctx, base)
-		if err != nil {
-			log.Printf("Warning: Failed to fetch rates for base '%s': %v. Skipping.", base, err)
-			continue
-		}
-		fetchedRates[base] = ratesResp
-		time.Sleep(200 * time.Millisecond) // Be nice to the API
+		jobs <- base
+	}
+	close(jobs)
+
+	wg.Wait()
+	close(results)
+
+	// 3. Collect results and prepare the new cache map
+	fetchedRates := make(map[string]*RatesAPIResponse)
+	for res := range results {
+		baseCode := res.Date                       // Retrieve the base code stored in the Date field
+		res.Date = time.Now().Format("2006-01-02") // Reset Date to a sensible value
+		fetchedRates[baseCode] = res
 	}
 
-	// 3. Lock and update the cache
+	if len(fetchedRates) < len(baseCurrenciesToFetch)/2 {
+		return fmt.Errorf("failed to fetch a majority of currency rates (%d/%d successful)", len(fetchedRates), len(baseCurrenciesToFetch))
+	}
+
+	// 4. Lock and atomically swap the cache content
 	ac.mu.Lock()
 	ac.allCurrencies = fetchedCurrencies
-	for base, rates := range fetchedRates {
-		ac.defaultRates[base] = rates
-	}
+	ac.defaultRates = fetchedRates
 	ac.mu.Unlock()
 
-	log.Println("Default provider data updated successfully.")
+	log.Printf("Full fetch complete. Updated data for %d base currencies.", len(fetchedRates))
 	return nil
 }
 
@@ -220,6 +302,31 @@ func (ac *APICache) fetchRatesForBase(ctx context.Context, baseCurrency string) 
 	}
 
 	return &RatesAPIResponse{Date: date, Rates: finalRates}, nil
+}
+
+// fetchAndCacheRatesForBase handles fetching and caching for a missing base currency with proper locking.
+// This is now a fallback for currencies added to the API between full refresh cycles.
+func (ac *APICache) fetchAndCacheRatesForBase(ctx context.Context, baseCurrency string) (*RatesAPIResponse, error) {
+	// Acquire write lock to modify cache
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+
+	// Double-check if another goroutine fetched it while we were waiting for the lock
+	if rates, exists := ac.defaultRates[baseCurrency]; exists {
+		log.Printf("Cache entry for '%s' appeared while waiting for lock.", baseCurrency)
+		return rates, nil
+	}
+
+	// Fetch the rates; the passed-in context from the HTTP request handles the timeout.
+	ratesResp, err := ac.fetchRatesForBase(ctx, baseCurrency)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store in cache
+	ac.defaultRates[baseCurrency] = ratesResp
+	log.Printf("Successfully fetched and cached rates for base '%s'.", baseCurrency)
+	return ratesResp, nil
 }
 
 func (ac *APICache) fetchWhitebirdRates() error {
@@ -325,7 +432,8 @@ func (ac *APICache) GetAllCurrencies() (AllCurrenciesResponse, error) {
 }
 
 // GetConversionRate returns the rate for 1 unit of fromCurrency to toCurrency from the default provider.
-func (ac *APICache) GetConversionRate(fromCurrency, toCurrency string) (float64, string, error) {
+// It will fetch rates on-demand if the fromCurrency is not in the cache.
+func (ac *APICache) GetConversionRate(ctx context.Context, fromCurrency, toCurrency string) (float64, string, error) {
 	lcFrom := strings.ToLower(fromCurrency)
 	lcTo := strings.ToLower(toCurrency)
 
@@ -334,15 +442,24 @@ func (ac *APICache) GetConversionRate(fromCurrency, toCurrency string) (float64,
 	}
 
 	ac.mu.RLock()
-	defer ac.mu.RUnlock()
-
 	ratesResp, ok := ac.defaultRates[lcFrom]
+	ac.mu.RUnlock() // Release read lock
+
 	if !ok {
-		return 0, "", fmt.Errorf("base currency '%s' not available in cache", fromCurrency)
+		// Not in cache, try fetching it on-demand.
+		log.Printf("Cache miss for base currency '%s'. Fetching on-demand.", fromCurrency)
+		var err error
+		ratesResp, err = ac.fetchAndCacheRatesForBase(ctx, lcFrom)
+		if err != nil {
+			return 0, "", fmt.Errorf("on-demand fetch failed for base currency '%s': %w", fromCurrency, err)
+		}
 	}
 
+	// Now ratesResp should be populated.
 	rate, ok := ratesResp.Rates[lcTo]
 	if !ok {
+		// This can happen if the target currency is not in the list for the given base.
+		// For example, converting from a very obscure currency to another.
 		return 0, "", fmt.Errorf("target currency '%s' not found for base '%s'", toCurrency, fromCurrency)
 	}
 
@@ -360,18 +477,4 @@ func (ac *APICache) GetWhitebirdRate(fromCurrency, toCurrency string) (float64, 
 		return 0, fmt.Errorf("whitebird rate for %s to %s not available in cache", fromCurrency, toCurrency)
 	}
 	return rate, nil
-}
-
-// DEPRECATED: GetRates is kept for compatibility in case any part of the code still uses it,
-// but GetConversionRate is the preferred method for external use.
-func (ac *APICache) GetRates(ctx context.Context, baseCurrency string) (*RatesAPIResponse, error) {
-	baseCurrency = strings.ToLower(baseCurrency)
-	ac.mu.RLock()
-	defer ac.mu.RUnlock()
-
-	ratesResp, ok := ac.defaultRates[baseCurrency]
-	if !ok {
-		return nil, fmt.Errorf("rates for base '%s' not available in cache", baseCurrency)
-	}
-	return ratesResp, nil
 }
