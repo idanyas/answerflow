@@ -1,19 +1,21 @@
 package currency
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 )
 
-const (
-	symbolsConfigPath     = "modules/currency/config/currency_symbols.json"
-	nameAliasesConfigPath = "modules/currency/config/currency_name_aliases.json"
-)
+// Embed the JSON configuration files directly into the binary
+//
+//go:embed config/currency_symbols.json
+var embeddedSymbolsJSON []byte
+
+//go:embed config/currency_name_aliases.json
+var embeddedNameAliasesJSON []byte
 
 // CurrencyData holds mappings for symbols, names, and codes.
 type CurrencyData struct {
@@ -24,38 +26,26 @@ type CurrencyData struct {
 	initialised bool // Tracks if PopulateDynamicAliases has been run with API data at least once
 }
 
-func loadConfigMapFromFile(filePath string) (map[string]string, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		// Try to construct path relative to current working directory if direct path fails
-		cwd, _ := os.Getwd()
-		altPath := filepath.Join(cwd, filePath)
-		data, err = os.ReadFile(altPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading config file %s (and alternative %s): %w", filePath, altPath, err)
-		}
-		log.Printf("Loaded config file from alternative path: %s", altPath)
-	}
-
+func loadConfigMapFromEmbedded(data []byte, description string) (map[string]string, error) {
 	var configMap map[string]string
 	if err := json.Unmarshal(data, &configMap); err != nil {
-		return nil, fmt.Errorf("unmarshaling config file %s: %w", filePath, err)
+		return nil, fmt.Errorf("unmarshaling %s: %w", description, err)
 	}
 	return configMap, nil
 }
 
 func NewCurrencyData() *CurrencyData {
-	// Load symbols from JSON
-	loadedSymbols, err := loadConfigMapFromFile(symbolsConfigPath)
+	// Load symbols from embedded JSON
+	loadedSymbols, err := loadConfigMapFromEmbedded(embeddedSymbolsJSON, "currency symbols")
 	if err != nil {
-		log.Printf("Warning: Failed to load currency symbols from %s: %v. Using empty map.", symbolsConfigPath, err)
+		log.Printf("Warning: Failed to load currency symbols from embedded data: %v. Using empty map.", err)
 		loadedSymbols = make(map[string]string)
 	}
 
-	// Load name aliases from JSON
-	loadedNameAliases, err := loadConfigMapFromFile(nameAliasesConfigPath)
+	// Load name aliases from embedded JSON
+	loadedNameAliases, err := loadConfigMapFromEmbedded(embeddedNameAliasesJSON, "currency name aliases")
 	if err != nil {
-		log.Printf("Warning: Failed to load currency name aliases from %s: %v. Using empty map.", nameAliasesConfigPath, err)
+		log.Printf("Warning: Failed to load currency name aliases from embedded data: %v. Using empty map.", err)
 		loadedNameAliases = make(map[string]string)
 	}
 
@@ -111,6 +101,7 @@ func NewCurrencyData() *CurrencyData {
 	return cd
 }
 
+// Rest of the file remains unchanged...
 func (cd *CurrencyData) PopulateDynamicAliases(allCurrenciesFromAPI map[string]string) {
 	cd.mu.Lock()
 	defer cd.mu.Unlock()
