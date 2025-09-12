@@ -16,6 +16,7 @@ import (
 const (
 	scoreSpecificConversion = 100
 	scoreBaseConversion     = 90
+	scoreReverseConversion  = 85 // Score for the reverse of a base conversion (e.g., RUB -> USD for a "usd" query)
 	scoreQuickConversion    = 80
 	scoreWhitebird          = 110 // Higher score for Whitebird direct match
 )
@@ -71,6 +72,16 @@ func (m *CurrencyConverterModule) DefaultIconPath() string {
 	return m.defaultIconPath
 }
 
+// formatAmount formats a numeric amount based on its currency code's precision rules.
+func formatAmount(amount float64, currencyCode string) string {
+	precision, isHighPrecision := highPrecisionCurrencies[currencyCode]
+	if !isHighPrecision {
+		precision = 2
+	}
+	ac := accounting.Accounting{Symbol: "", Precision: precision}
+	return ac.FormatMoneyFloat64(amount)
+}
+
 // ProcessQuery handles a user's query.
 func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string, apiCache *APICache) ([]commontypes.FlowResult, error) {
 	if strings.TrimSpace(query) == "" {
@@ -116,7 +127,7 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 			return nil, nil // Avoid converting to itself
 		}
 
-		res, errGen := m.generateConversionResult(ctx, parsedRequest, parsedRequest.ToCurrency, apiCache, scoreSpecificConversion)
+		res, _, errGen := m.generateConversionResult(ctx, parsedRequest, parsedRequest.ToCurrency, apiCache, scoreSpecificConversion, false)
 		if errGen != nil {
 			log.Printf("CurrencyConverterModule: Error generating specific conversion for %s to %s: %v", parsedRequest.FromCurrency, parsedRequest.ToCurrency, errGen)
 		} else if res != nil {
@@ -125,26 +136,47 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 	} else {
 		// User did not specify a target currency, use defaults
 		handledTargets := make(map[string]bool)
+		var baseConversionSucceeded bool
 
-		// Base conversion
+		// 1. Perform Base Conversion first to get the amount for the reverse conversion.
 		if m.baseConversionCurrency != "" &&
 			m.baseConversionCurrency != parsedRequest.FromCurrency &&
 			!handledTargets[m.baseConversionCurrency] {
-			res, errGen := m.generateConversionResult(ctx, parsedRequest, m.baseConversionCurrency, apiCache, scoreBaseConversion)
+
+			res, _, errGen := m.generateConversionResult(ctx, parsedRequest, m.baseConversionCurrency, apiCache, scoreBaseConversion, false)
 			if errGen != nil {
 				log.Printf("CurrencyConverterModule: Error generating base conversion for %s to %s: %v", parsedRequest.FromCurrency, m.baseConversionCurrency, errGen)
 			} else if res != nil {
 				results = append(results, *res)
 				handledTargets[m.baseConversionCurrency] = true
+				baseConversionSucceeded = true
 			}
 		}
 
-		// Quick conversions
+		// 2. If Base Conversion was successful, generate the Reverse Conversion.
+		if baseConversionSucceeded {
+			// Create a request that asks: "How much of the base currency (e.g., RUB)
+			// is required to get the user's original amount and currency (e.g., 24 USD)?"
+			reverseRequest := &ConversionRequest{
+				Amount:       parsedRequest.Amount,       // The target amount (e.g., 24)
+				FromCurrency: m.baseConversionCurrency,   // The currency we are paying with (e.g., RUB)
+				ToCurrency:   parsedRequest.FromCurrency, // The currency we want to receive (e.g., USDT)
+			}
+
+			res, _, errGen := m.generateConversionResult(ctx, reverseRequest, reverseRequest.ToCurrency, apiCache, scoreReverseConversion, true)
+			if errGen != nil {
+				log.Printf("CurrencyConverterModule: Error generating reverse conversion for %s to %s: %v", reverseRequest.FromCurrency, reverseRequest.ToCurrency, errGen)
+			} else if res != nil {
+				results = append(results, *res)
+			}
+		}
+
+		// 3. Quick conversions
 		for _, target := range m.quickConversionTargets {
 			if target == parsedRequest.FromCurrency || handledTargets[target] {
 				continue
 			}
-			res, errGen := m.generateConversionResult(ctx, parsedRequest, target, apiCache, scoreQuickConversion)
+			res, _, errGen := m.generateConversionResult(ctx, parsedRequest, target, apiCache, scoreQuickConversion, false)
 			if errGen != nil {
 				log.Printf("CurrencyConverterModule: Error generating quick conversion for %s to %s: %v", parsedRequest.FromCurrency, target, errGen)
 				continue
@@ -163,12 +195,15 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 }
 
 // generateConversionResult creates a FlowResult for a given conversion.
+// If isReverse is true, it calculates the required amount of `req.FromCurrency` to get `req.Amount` of `targetCurrency`.
+// If isReverse is false, it calculates the converted amount from `req.Amount` of `req.FromCurrency` to `targetCurrency`.
 func (m *CurrencyConverterModule) generateConversionResult(
 	ctx context.Context,
 	req *ConversionRequest,
 	targetCurrency string,
 	apiCache *APICache,
-	baseScore int) (*commontypes.FlowResult, error) {
+	baseScore int,
+	isReverse bool) (*commontypes.FlowResult, float64, error) {
 
 	// ALIASING: Handle USD as an alias for USDT for the target currency.
 	effectiveTargetCurrency := targetCurrency
@@ -177,83 +212,133 @@ func (m *CurrencyConverterModule) generateConversionResult(
 	}
 
 	// The req.FromCurrency is already aliased in ProcessQuery.
-	// This check now correctly prevents USDT -> USDT self-conversion (e.g. for a "1 usd" query).
-	if req.FromCurrency == effectiveTargetCurrency {
-		return nil, nil
+	fromCurrency := req.FromCurrency
+	if fromCurrency == effectiveTargetCurrency {
+		return nil, 0, nil
 	}
 
-	// --- Whitebird Provider Logic ---
-	isWhitebirdPair := true
-	var finalAmount float64
-	var effectiveRate float64
-	var rawRate float64
+	var finalAmount float64 // For direct: converted amount. For reverse: required amount.
+	var displayRate float64
 	var err error
+	sourceName := "currency-api"
+	score := baseScore
 
-	// Use the aliased effectiveTargetCurrency for logic checks.
+	// --- Determine provider and calculate ---
+	useWhitebird := true
 	switch {
-	case req.FromCurrency == "RUB" && effectiveTargetCurrency == "USDT":
-		rawRate, err = apiCache.GetWhitebirdRate("RUB", "USDT")
-		if err == nil {
-			fiatFee := req.Amount * 0.02439
-			cryptoFee := 0.038541 * rawRate
-			netToConvert := req.Amount - fiatFee - cryptoFee
-			// MODIFIED: Prevent negative conversion results if fees exceed the amount.
-			if netToConvert <= 0 {
-				finalAmount = 0
-			} else {
-				converted := netToConvert / rawRate
-				finalAmount = converted / 1.0217 // Add +2.17% fee (Sber Pay)
-			}
+	case fromCurrency == "RUB" && effectiveTargetCurrency == "USDT":
+	case fromCurrency == "USDT" && effectiveTargetCurrency == "RUB":
+	case fromCurrency == "BYN" && effectiveTargetCurrency == "USDT":
+		// We don't have a USDT->BYN formula, so this pair is one-way for Whitebird.
+		if isReverse {
+			useWhitebird = false
 		}
-
-	case req.FromCurrency == "USDT" && effectiveTargetCurrency == "RUB":
-		rawRate, err = apiCache.GetWhitebirdRate("USDT", "RUB")
-		if err == nil {
-			converted := (req.Amount * rawRate) * 0.985
-			finalAmount = converted / 1.015 // Add +1.5% fee (MIR cards payout)
-		}
-
-	case req.FromCurrency == "BYN" && effectiveTargetCurrency == "USDT":
-		rawRate, err = apiCache.GetWhitebirdRate("BYN", "USDT")
-		if err == nil {
-			fiatFee := req.Amount * 0.024371
-			cryptoFee := 0.038778 * rawRate
-			netToConvert := req.Amount - fiatFee - cryptoFee
-			// MODIFIED: Prevent negative conversion results if fees exceed the amount.
-			if netToConvert <= 0 {
-				finalAmount = 0
-			} else {
-				finalAmount = netToConvert / rawRate
-			}
-		}
-
 	default:
-		isWhitebirdPair = false
+		useWhitebird = false
 	}
 
-	if isWhitebirdPair {
+	if useWhitebird {
+		sourceName = "Blackanimal"
+		// Only boost score for direct special conversions, not reverse ones.
+		if !isReverse {
+			score = scoreWhitebird
+		}
+
+		if isReverse {
+			// REVERSE LOGIC: Calculate required `fromCurrency` to get `req.Amount` of `effectiveTargetCurrency`
+			targetAmount := req.Amount
+			switch {
+			case fromCurrency == "RUB" && effectiveTargetCurrency == "USDT": // How many RUB to get X USDT?
+				rawRate, errGet := apiCache.GetWhitebirdRate("RUB", "USDT")
+				if errGet == nil {
+					finalAmount = (rawRate * (targetAmount*1.0217 + 0.038541)) / 0.97561
+				}
+				err = errGet
+			case fromCurrency == "USDT" && effectiveTargetCurrency == "RUB": // How many USDT to get X RUB?
+				rawRate, errGet := apiCache.GetWhitebirdRate("USDT", "RUB")
+				if errGet == nil {
+					finalAmount = (targetAmount * 1.015) / (rawRate * 0.985)
+				}
+				err = errGet
+			}
+			if targetAmount > 0 {
+				displayRate = finalAmount / targetAmount
+			}
+		} else {
+			// DIRECT LOGIC
+			initialAmount := req.Amount
+			switch {
+			case fromCurrency == "RUB" && effectiveTargetCurrency == "USDT":
+				rawRate, errGet := apiCache.GetWhitebirdRate("RUB", "USDT")
+				if errGet == nil {
+					fiatFee := initialAmount * 0.02439
+					cryptoFee := 0.038541 * rawRate
+					netToConvert := initialAmount - fiatFee - cryptoFee
+					if netToConvert > 0 {
+						converted := netToConvert / rawRate
+						finalAmount = converted / 1.0217
+					}
+				}
+				err = errGet
+			case fromCurrency == "USDT" && effectiveTargetCurrency == "RUB":
+				rawRate, errGet := apiCache.GetWhitebirdRate("USDT", "RUB")
+				if errGet == nil {
+					converted := (initialAmount * rawRate) * 0.985
+					finalAmount = converted / 1.015
+				}
+				err = errGet
+			case fromCurrency == "BYN" && effectiveTargetCurrency == "USDT":
+				rawRate, errGet := apiCache.GetWhitebirdRate("BYN", "USDT")
+				if errGet == nil {
+					fiatFee := initialAmount * 0.024371
+					cryptoFee := 0.038778 * rawRate
+					netToConvert := initialAmount - fiatFee - cryptoFee
+					if netToConvert > 0 {
+						finalAmount = netToConvert / rawRate
+					}
+				}
+				err = errGet
+			}
+			if initialAmount > 0 {
+				displayRate = finalAmount / initialAmount
+			}
+		}
+
 		if err != nil {
-			return nil, fmt.Errorf("getting Whitebird rate: %w", err)
+			return nil, 0, fmt.Errorf("getting Whitebird rate: %w", err)
 		}
-		// Ensure final amount is not negative.
-		finalAmount = math.Max(0, finalAmount)
-		if req.Amount > 0 {
-			effectiveRate = finalAmount / req.Amount
-		}
-		// Pass the original targetCurrency for display purposes.
-		return m.formatResult(req, targetCurrency, finalAmount, effectiveRate, scoreWhitebird, "Blackanimal"), nil
-	}
-	// --- End Whitebird Provider Logic ---
 
-	// --- Default Provider Fallback ---
-	// Use the aliased effectiveTargetCurrency for fetching the rate.
-	rate, _, err := apiCache.GetConversionRate(ctx, req.FromCurrency, effectiveTargetCurrency)
-	if err != nil {
-		return nil, fmt.Errorf("getting conversion rate from default provider: %w", err)
+	} else {
+		// --- Default Provider Fallback ---
+		if isReverse {
+			targetAmount := req.Amount
+			rate, _, errGet := apiCache.GetConversionRate(ctx, fromCurrency, effectiveTargetCurrency)
+			if errGet != nil {
+				return nil, 0, fmt.Errorf("getting reverse conversion rate: %w", errGet)
+			}
+			if rate > 0 {
+				finalAmount = targetAmount / rate
+				displayRate = 1 / rate // The effective rate is for target -> from
+			}
+			err = errGet
+		} else {
+			initialAmount := req.Amount
+			rate, _, errGet := apiCache.GetConversionRate(ctx, fromCurrency, effectiveTargetCurrency)
+			if errGet != nil {
+				return nil, 0, fmt.Errorf("getting conversion rate: %w", errGet)
+			}
+			finalAmount = initialAmount * rate
+			displayRate = rate
+			err = errGet
+		}
 	}
-	convertedAmount := req.Amount * rate
-	// Pass the original targetCurrency for display purposes.
-	return m.formatResult(req, targetCurrency, convertedAmount, rate, baseScore, "currency-api"), nil
+
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed during rate calculation: %w", err)
+	}
+
+	finalAmount = math.Max(0, finalAmount)
+	return m.formatResult(req, targetCurrency, finalAmount, displayRate, score, sourceName, isReverse), finalAmount, nil
 }
 
 // formatResult formats the final result into a FlowResult.
@@ -263,50 +348,71 @@ func (m *CurrencyConverterModule) formatResult(
 	finalAmount float64,
 	displayRate float64,
 	score int,
-	sourceName string) *commontypes.FlowResult {
+	sourceName string,
+	isReverse bool) *commontypes.FlowResult {
 
-	// Determine precision for the input currency
-	inputPrecision, isInputHighPrecision := highPrecisionCurrencies[req.FromCurrency]
-	if !isInputHighPrecision {
-		inputPrecision = 2
-	}
-	acInput := accounting.Accounting{Symbol: "", Precision: inputPrecision}
-	formattedInputAmount := acInput.FormatMoneyFloat64(req.Amount)
+	var title, subTitle, clipboardText string
 
-	// Determine precision for the output currency (target)
-	outputPrecision, isOutputHighPrecision := highPrecisionCurrencies[targetCurrency]
-	if !isOutputHighPrecision {
-		outputPrecision = 2
-	}
-	acOutput := accounting.Accounting{Symbol: "", Precision: outputPrecision}
-	formattedConvertedAmount := acOutput.FormatMoneyFloat64(finalAmount)
+	if isReverse {
+		// --- REVERSE CONVERSION FORMATTING ---
+		// Here, `finalAmount` is the required amount of `req.FromCurrency`.
+		// `req.Amount` is the target amount of `targetCurrency`.
 
-	var title string
-	if m.ShortDisplayFormat {
-		title = fmt.Sprintf("%s %s", formattedConvertedAmount, targetCurrency)
+		requiredAmount := finalAmount
+		requiredCurrency := req.FromCurrency
+		formattedRequiredAmount := formatAmount(requiredAmount, requiredCurrency)
+		title = fmt.Sprintf("%s %s", formattedRequiredAmount, requiredCurrency)
+
+		// targetAmount := req.Amount
+		// formattedTargetAmount := formatAmount(targetAmount, targetCurrency)
+		// subTitle = fmt.Sprintf("Amount in %s required to receive %s %s", requiredCurrency, formattedTargetAmount, targetCurrency)
+		subTitle = fmt.Sprintf("1 %s = %s %s 🛒", req.FromCurrency, formatRate(displayRate), targetCurrency)
+
+		outputPrecision, isHighPrecision := highPrecisionCurrencies[requiredCurrency]
+		if !isHighPrecision {
+			outputPrecision = 2
+		}
+		clipboardText = strconv.FormatFloat(requiredAmount, 'f', outputPrecision, 64)
+
 	} else {
-		title = fmt.Sprintf("%s %s = %s %s",
-			formattedInputAmount, req.FromCurrency,
-			formattedConvertedAmount, targetCurrency)
-	}
+		// --- DIRECT CONVERSION FORMATTING ---
+		// Here, `finalAmount` is the converted amount in `targetCurrency`.
+		// `req.Amount` is the initial amount in `req.FromCurrency`.
 
-	// Invert subtitle for specific pairs for better readability
-	var subTitle string
-	lookupKey := fmt.Sprintf("%s_%s", req.FromCurrency, targetCurrency)
-	if _, shouldInvert := m.invertedRatePairs[lookupKey]; shouldInvert && displayRate > 0 {
-		invertedRate := 1 / displayRate
-		// subTitle = fmt.Sprintf("1 %s = %s %s · %s", targetCurrency, formatRate(invertedRate), req.FromCurrency, sourceName)
-		subTitle = fmt.Sprintf("1 %s = %s %s", targetCurrency, formatRate(invertedRate), req.FromCurrency)
-	} else {
-		subTitle = fmt.Sprintf("1 %s = %s %s", req.FromCurrency, formatRate(displayRate), targetCurrency)
-	}
+		formattedInputAmount := formatAmount(req.Amount, req.FromCurrency)
+		outputPrecision, isOutputHighPrecision := highPrecisionCurrencies[targetCurrency]
+		if !isOutputHighPrecision {
+			outputPrecision = 2
+		}
+		acOutput := accounting.Accounting{Symbol: "", Precision: outputPrecision}
+		formattedConvertedAmount := acOutput.FormatMoneyFloat64(finalAmount)
 
-	if sourceName == "Whitebird" {
-		// subTitle = fmt.Sprintf("Effective rate via %s: 1 %s ≈ %s %s", sourceName, req.FromCurrency, formatRate(displayRate), targetCurrency)
-	}
+		if m.ShortDisplayFormat {
+			title = fmt.Sprintf("%s %s", formattedConvertedAmount, targetCurrency)
+		} else {
+			title = fmt.Sprintf("%s %s = %s %s",
+				formattedInputAmount, req.FromCurrency,
+				formattedConvertedAmount, targetCurrency)
+		}
 
-	// Use the determined outputPrecision for the clipboard text.
-	clipboardText := strconv.FormatFloat(finalAmount, 'f', outputPrecision, 64)
+		var rateStr string
+		lookupKey := fmt.Sprintf("%s_%s", req.FromCurrency, targetCurrency)
+		if _, shouldInvert := m.invertedRatePairs[lookupKey]; shouldInvert && displayRate > 0 {
+			invertedRate := 1 / displayRate
+			rateStr = fmt.Sprintf("1 %s = %s %s", targetCurrency, formatRate(invertedRate), req.FromCurrency)
+		} else {
+			rateStr = fmt.Sprintf("1 %s = %s %s", req.FromCurrency, formatRate(displayRate), targetCurrency)
+		}
+
+		// if m.ShortDisplayFormat {
+		// inputStr := fmt.Sprintf("%s %s", formattedInputAmount, req.FromCurrency)
+		// subTitle = fmt.Sprintf("%s  ·  %s", inputStr, rateStr)
+		// } else {
+		subTitle = rateStr
+		// }
+
+		clipboardText = strconv.FormatFloat(finalAmount, 'f', outputPrecision, 64)
+	}
 
 	return &commontypes.FlowResult{
 		Title:    title,
@@ -321,7 +427,7 @@ func (m *CurrencyConverterModule) formatResult(
 
 // formatRate formats the exchange rate with appropriate precision.
 func formatRate(rate float64) string {
-	if rate <= 0 { // MODIFIED: handle zero or negative rates cleanly
+	if rate <= 0 {
 		return "0"
 	}
 	var formattedRate string
