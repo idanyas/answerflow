@@ -251,7 +251,7 @@ func (m *CurrencyConverterModule) generateConversionResult(
 			case fromCurrency == "RUB" && effectiveTargetCurrency == "USDT": // How many RUB to get X USDT?
 				rawRate, errGet := apiCache.GetWhitebirdRate("RUB", "USDT")
 				if errGet == nil {
-					finalAmount = (rawRate * (targetAmount*1.0217 + 0.038541)) / 0.97561
+					finalAmount = (rawRate * (targetAmount*1.015 + 0.038541)) / 0.97561
 				}
 				err = errGet
 			case fromCurrency == "USDT" && effectiveTargetCurrency == "RUB": // How many USDT to get X RUB?
@@ -276,7 +276,7 @@ func (m *CurrencyConverterModule) generateConversionResult(
 					netToConvert := initialAmount - fiatFee - cryptoFee
 					if netToConvert > 0 {
 						converted := netToConvert / rawRate
-						finalAmount = converted / 1.0217
+						finalAmount = converted / 1.015
 					}
 				}
 				err = errGet
