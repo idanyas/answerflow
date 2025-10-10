@@ -185,6 +185,29 @@ func (m *CurrencyConverterModule) ProcessQuery(ctx context.Context, query string
 				results = append(results, *res)
 				handledTargets[target] = true
 			}
+
+			// Generate reverse conversion for RUB <-> USD/USDT pairs
+			shouldGenerateReverse := false
+			if (parsedRequest.FromCurrency == "RUB" && (target == "USD" || target == "USDT")) ||
+				((parsedRequest.FromCurrency == "USD" || parsedRequest.FromCurrency == "USDT") && target == "RUB") {
+				shouldGenerateReverse = true
+			}
+
+			if shouldGenerateReverse {
+				reverseRequest := &ConversionRequest{
+					Amount:       parsedRequest.Amount,
+					FromCurrency: target,
+					ToCurrency:   parsedRequest.FromCurrency,
+				}
+				res, _, errGen := m.generateConversionResult(ctx, reverseRequest, reverseRequest.ToCurrency, apiCache, scoreReverseConversion, true)
+				if errGen != nil {
+					log.Printf("CurrencyConverterModule: Error generating reverse quick conversion for %s to %s: %v", reverseRequest.FromCurrency, reverseRequest.ToCurrency, errGen)
+					continue
+				}
+				if res != nil {
+					results = append(results, *res)
+				}
+			}
 		}
 	}
 
@@ -365,6 +388,29 @@ func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCur
 
 	var title, subTitle, clipboardText string
 
+	// Determine if this conversion involves RUB and USD/USDT
+	currencies := []string{req.FromCurrency, targetCurrency}
+	hasRub := false
+	hasUsdOrUsdt := false
+	for _, curr := range currencies {
+		if curr == "RUB" {
+			hasRub = true
+		}
+		if curr == "USD" || curr == "USDT" {
+			hasUsdOrUsdt = true
+		}
+	}
+	involvesRubAndUsd := hasRub && hasUsdOrUsdt
+
+	var tag string
+	if involvesRubAndUsd {
+		if isReverse {
+			tag = " 🛍️ купить"
+		} else {
+			tag = " 🏷 продать"
+		}
+	}
+
 	if isReverse {
 		// --- REVERSE CONVERSION FORMATTING ---
 		// Here, `finalAmount` is the required amount of `req.FromCurrency`.
@@ -375,10 +421,30 @@ func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCur
 		formattedRequiredAmount := formatAmount(requiredAmount, requiredCurrency)
 		title = fmt.Sprintf("%s %s", formattedRequiredAmount, requiredCurrency)
 
-		// targetAmount := req.Amount
-		// formattedTargetAmount := formatAmount(targetAmount, targetCurrency)
-		// subTitle = fmt.Sprintf("Amount in %s required to receive %s %s", requiredCurrency, formattedTargetAmount, targetCurrency)
-		subTitle = fmt.Sprintf("1 %s = %s %s 🛒", req.FromCurrency, formatRate(displayRate), targetCurrency)
+		// For RUB-USD/USDT pairs, always show as "1 USD/USDT = ... RUB"
+		if involvesRubAndUsd {
+			var baseCurr, quoteCurr string
+			var rate float64
+
+			if targetCurrency == "RUB" {
+				// FromCurrency is USD/USDT, targetCurrency is RUB
+				// displayRate = FromCurrency/RUB, we want RUB/FromCurrency
+				baseCurr = req.FromCurrency // USD/USDT
+				quoteCurr = targetCurrency  // RUB
+				rate = 1 / displayRate      // RUB per USD
+			} else {
+				// targetCurrency is USD/USDT, FromCurrency is RUB
+				// displayRate = RUB/USD, which is already RUB per USD
+				baseCurr = targetCurrency    // USD/USDT
+				quoteCurr = req.FromCurrency // RUB
+				rate = displayRate           // RUB per USD
+			}
+
+			subTitle = fmt.Sprintf("1 %s = %s %s%s", baseCurr, formatRate(rate), quoteCurr, tag)
+		} else {
+			// Default reverse subtitle
+			subTitle = fmt.Sprintf("1 %s = %s %s%s", targetCurrency, formatRate(displayRate), req.FromCurrency, tag)
+		}
 
 		outputPrecision, isHighPrecision := highPrecisionCurrencies[requiredCurrency]
 		if !isHighPrecision {
@@ -416,12 +482,7 @@ func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCur
 			rateStr = fmt.Sprintf("1 %s = %s %s", req.FromCurrency, formatRate(displayRate), targetCurrency)
 		}
 
-		// if m.ShortDisplayFormat {
-		// inputStr := fmt.Sprintf("%s %s", formattedInputAmount, req.FromCurrency)
-		// subTitle = fmt.Sprintf("%s  ·  %s", inputStr, rateStr)
-		// } else {
-		subTitle = rateStr
-		// }
+		subTitle = rateStr + tag
 
 		clipboardText = strconv.FormatFloat(finalAmount, 'f', outputPrecision, 64)
 	}
