@@ -55,7 +55,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: binary-*
-          merge-multiple: true
+          path: bin-artifacts/
+
+      - name: Reorganize binaries
+        run: |
+          mkdir -p bin
+          for artifact in bin-artifacts/binary-*; do
+            cp -r $artifact/bin/* bin/
+          done
+          ls -R bin/
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
