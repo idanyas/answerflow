@@ -220,7 +220,6 @@ func (m *CurrencyConverterModule) generateConversionResult(
 	var finalAmount float64 // For direct: converted amount. For reverse: required amount.
 	var displayRate float64
 	var err error
-	sourceName := "currency-api"
 	score := baseScore
 
 	// --- Determine provider and calculate ---
@@ -238,7 +237,6 @@ func (m *CurrencyConverterModule) generateConversionResult(
 	}
 
 	if useWhitebird {
-		sourceName = "Blackanimal"
 		// Only boost score for direct special conversions, not reverse ones.
 		if !isReverse {
 			score = scoreWhitebird
@@ -251,13 +249,26 @@ func (m *CurrencyConverterModule) generateConversionResult(
 			case fromCurrency == "RUB" && effectiveTargetCurrency == "USDT": // How many RUB to get X USDT?
 				rawRate, errGet := apiCache.GetWhitebirdRate("RUB", "USDT")
 				if errGet == nil {
-					finalAmount = (rawRate * (targetAmount*1.015 + 0.038541)) / 0.97561
+					// Reverse of: NetOutput = ( (Input * (1-FiatRate)) / rawRate - CryptoFee ) * (1-ExtraFee)
+					// Let NetOutput = targetAmount. Solve for Input.
+					// Input = ( ( (targetAmount / (1-ExtraFee)) + CryptoFee) * rawRate ) / (1-FiatRate)
+					fiatFeeRate := 0.02439
+					cryptoFeeUSDT := 0.034155
+					extraFeeRate := 0.015
+
+					grossTargetUSDT := targetAmount / (1 - extraFeeRate)
+					usdtBeforeCryptoFee := grossTargetUSDT + cryptoFeeUSDT
+					rubBeforeFiatFee := usdtBeforeCryptoFee * rawRate
+					requiredRUB := rubBeforeFiatFee / (1 - fiatFeeRate)
+					finalAmount = requiredRUB
 				}
 				err = errGet
 			case fromCurrency == "USDT" && effectiveTargetCurrency == "RUB": // How many USDT to get X RUB?
 				rawRate, errGet := apiCache.GetWhitebirdRate("USDT", "RUB")
 				if errGet == nil {
-					finalAmount = (targetAmount * 1.015) / (rawRate * 0.985)
+					// Base formula: Output = ( (Input * rawRate * 0.985) / 1.015 ) * (1 - 0.020)
+					// Solve for Input: Input = ( (Output / (1-0.020)) * 1.015 ) / (rawRate * 0.985)
+					finalAmount = ((targetAmount / (1 - 0.020)) * 1.015) / (rawRate * 0.985)
 				}
 				err = errGet
 			}
@@ -271,20 +282,28 @@ func (m *CurrencyConverterModule) generateConversionResult(
 			case fromCurrency == "RUB" && effectiveTargetCurrency == "USDT":
 				rawRate, errGet := apiCache.GetWhitebirdRate("RUB", "USDT")
 				if errGet == nil {
-					fiatFee := initialAmount * 0.02439
-					cryptoFee := 0.038541 * rawRate
-					netToConvert := initialAmount - fiatFee - cryptoFee
-					if netToConvert > 0 {
-						converted := netToConvert / rawRate
-						finalAmount = converted / 1.015
+					// Formula derived from HAR log: output = (input * (1 - 0.02439)) / rawRate - 0.034155
+					fiatFeeRate := 0.02439
+					cryptoFeeUSDT := 0.034155
+
+					netInputAfterFiatFee := initialAmount * (1 - fiatFeeRate)
+					convertedUSDT := netInputAfterFiatFee / rawRate
+					netUSDT := convertedUSDT - cryptoFeeUSDT
+
+					if netUSDT > 0 {
+						// Apply additional 1.6% fee (1.5%, but usually 1.6%)
+						finalAmount = netUSDT * (1 - 0.016)
 					}
 				}
 				err = errGet
 			case fromCurrency == "USDT" && effectiveTargetCurrency == "RUB":
 				rawRate, errGet := apiCache.GetWhitebirdRate("USDT", "RUB")
 				if errGet == nil {
+					// Base formula from reverse-engineering: (initialAmount * rawRate * 0.985) / 1.015
 					converted := (initialAmount * rawRate) * 0.985
-					finalAmount = converted / 1.015
+					withInternalFee := converted / 1.015
+					// Apply additional 2.1% fee (2.0%, but usually 2.1%)
+					finalAmount = withInternalFee * (1 - 0.021)
 				}
 				err = errGet
 			case fromCurrency == "BYN" && effectiveTargetCurrency == "USDT":
@@ -338,18 +357,11 @@ func (m *CurrencyConverterModule) generateConversionResult(
 	}
 
 	finalAmount = math.Max(0, finalAmount)
-	return m.formatResult(req, targetCurrency, finalAmount, displayRate, score, sourceName, isReverse), finalAmount, nil
+	return m.formatResult(req, targetCurrency, finalAmount, displayRate, score, isReverse), finalAmount, nil
 }
 
 // formatResult formats the final result into a FlowResult.
-func (m *CurrencyConverterModule) formatResult(
-	req *ConversionRequest,
-	targetCurrency string,
-	finalAmount float64,
-	displayRate float64,
-	score int,
-	sourceName string,
-	isReverse bool) *commontypes.FlowResult {
+func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCurrency string, finalAmount, displayRate float64, score int, isReverse bool) *commontypes.FlowResult {
 
 	var title, subTitle, clipboardText string
 
