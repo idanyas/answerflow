@@ -291,8 +291,8 @@ func (m *CurrencyConverterModule) generateConversionResult(
 					netUSDT := convertedUSDT - cryptoFeeUSDT
 
 					if netUSDT > 0 {
-						// Apply additional 1.6% fee (1.5%, but usually 1.6%)
-						finalAmount = netUSDT * (1 - 0.016)
+						// Apply additional 1.55% fee (1.5% MIR cards payout, but usually up to 1.55%)
+						finalAmount = netUSDT * (1 - 0.0155)
 					}
 				}
 				err = errGet
@@ -302,8 +302,8 @@ func (m *CurrencyConverterModule) generateConversionResult(
 					// Base formula from reverse-engineering: (initialAmount * rawRate * 0.985) / 1.015
 					converted := (initialAmount * rawRate) * 0.985
 					withInternalFee := converted / 1.015
-					// Apply additional 2.1% fee (2.0%, but usually 2.1%)
-					finalAmount = withInternalFee * (1 - 0.021)
+					// Apply additional 1.55% fee (1.5% MIR cards payout, but usually up to 1.55%)
+					finalAmount = withInternalFee * (1 - 0.0155)
 				}
 				err = errGet
 			case fromCurrency == "BYN" && effectiveTargetCurrency == "USDT":
