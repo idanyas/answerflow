@@ -34,7 +34,7 @@ jobs:
           [ -n "$GOARM" ] && export GOARM
           OUTPUT_PATH="bin/linux/$GOARCH/app"
           mkdir -p $(dirname $OUTPUT_PATH)
-          CGO_ENABLED=0 GOOS=linux GOARCH=$GOARCH go build -ldflags="-s -w" -o $OUTPUT_PATH ./cmd/server/main.go
+          CGO_ENABLED=0 GOOS=linux GOARCH=$GOARCH go build -ldflags="-s -w" -o $OUTPUT_PATH .
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
