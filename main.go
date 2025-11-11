@@ -17,7 +17,7 @@ import (
 
 const (
 	httpPort             = ":8080"
-	requestTimeout       = 5 * time.Second // Overall request timeout
+	requestTimeout       = 5 * time.Second
 	defaultModuleIcon    = "https://img.icons8.com/badges/100/decision.png"
 	noResultsIconPath    = "https://img.icons8.com/badges/100/decision.png"
 	currencyModuleIcon   = "https://img.icons8.com/badges/100/euro-exchange.png"
@@ -30,23 +30,20 @@ var (
 )
 
 func main() {
-	// Initialize the new proactive API cache
 	globalAPICache = currency.NewAPICache()
-	// Perform a blocking initial fetch to ensure data is ready before serving requests.
 	log.Println("Performing initial fetch of currency data...")
 	if err := globalAPICache.InitialFetch(); err != nil {
 		log.Fatalf("Failed to perform initial data fetch: %v", err)
 	}
 	log.Println("Initial data fetch complete.")
 
-	// Start the background processes to keep the cache updated
 	globalAPICache.StartBackgroundUpdaters()
 
 	currencyModuleInstance := currency.NewCurrencyConverterModule(
-		[]string{"USD", "EUR", "KZT"}, // Quick conversion targets
-		"RUB",                         // Base conversion currency
+		[]string{"EUR"}, // Quick conversion targets (EUR only, RUB/USD handled specially)
+		"USD",           // Base conversion currency
 		currencyModuleIcon,
-		true, // ShortDisplayFormat: false means "Input = Output", true means "Output" only
+		true, // ShortDisplayFormat
 	)
 	registeredModules = append(registeredModules, currencyModuleInstance)
 
@@ -89,8 +86,6 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(m modules.Module) {
 			defer wg.Done()
-			// The context passed to modules is for the overall request timeout,
-			// but individual modules might not need it if data is pre-cached.
 			moduleCtx := ctx
 
 			results, err := m.ProcessQuery(moduleCtx, query, globalAPICache)
@@ -104,7 +99,7 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 				if res.IcoPath == "" {
 					res.IcoPath = m.DefaultIconPath()
 				}
-				if res.IcoPath == "" { // Fallback if module's default icon is also empty
+				if res.IcoPath == "" {
 					res.IcoPath = defaultModuleIcon
 				}
 				allResults = append(allResults, res)
@@ -121,38 +116,29 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-waitChan:
-		// All goroutines completed within timeout
 	case <-ctx.Done():
-		// Timeout reached or context canceled
 		log.Printf("Request processing timed out or was canceled for query: '%s', error: %v", query, ctx.Err())
-		// If timeout occurs, allResults might be partially populated or empty.
-		// We still proceed to check if it's empty below.
 	}
 
 	sort.SliceStable(allResults, func(i, j int) bool {
 		return allResults[i].Score > allResults[j].Score
 	})
 
-	// MODIFIED: Check if allResults is empty and provide a "no results" item.
-	if len(allResults) == 0 && query != "" { // Only show "no results" if there was an actual query.
+	if len(allResults) == 0 && query != "" {
 		noResultsItem := commontypes.FlowResult{
 			Title:    "No results found",
 			SubTitle: "Please try a different query.",
 			IcoPath:  noResultsIconPath,
-			Score:    0, // Will be the only item, score is less critical here.
+			Score:    0,
 			JsonRPCAction: commontypes.JsonRPCAction{
-				Method:     "Flow.Launcher.ChangeQuery", // Standard Flow Launcher method
-				Parameters: []interface{}{query, false}, // Parameters: queryText (string), requery (bool)
+				Method:     "Flow.Launcher.ChangeQuery",
+				Parameters: []interface{}{query, false},
 			},
 		}
 		allResults = append(allResults, noResultsItem)
 	} else if len(allResults) == 0 && query == "" {
-		// If query is empty and no results (e.g. initial plugin load view), return an empty list.
-		// Or, you could define a specific "welcome" or "type to search" message here.
-		// For now, stick to Flow Launcher's default for an empty query by sending an empty list.
 		allResults = []commontypes.FlowResult{}
 	}
-	// END MODIFIED
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(allResults); err != nil {

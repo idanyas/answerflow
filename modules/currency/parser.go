@@ -3,7 +3,6 @@ package currency
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/expr-lang/expr"
@@ -52,15 +51,6 @@ func normalizeNumberString(s string) string {
 		// e.g. "1,2345" -> "12345"
 	}
 	return s
-}
-
-func normalizeAndParseNumber(amountStr string) (float64, error) {
-	normalizedStr := normalizeNumberString(amountStr)
-	val, err := strconv.ParseFloat(normalizedStr, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid number format '%s' (normalized to '%s')", amountStr, normalizedStr)
-	}
-	return val, nil
 }
 
 // Regex to find numbers that may have separators and k/m suffixes.
