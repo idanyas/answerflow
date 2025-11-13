@@ -19,7 +19,6 @@ const (
 	httpPort             = ":8080"
 	requestTimeout       = 5 * time.Second
 	defaultModuleIcon    = "https://img.icons8.com/badges/100/decision.png"
-	noResultsIconPath    = "https://img.icons8.com/badges/100/decision.png"
 	currencyModuleIcon   = "https://img.icons8.com/badges/100/euro-exchange.png"
 	calculatorModuleIcon = "https://img.icons8.com/badges/100/calculator.png"
 )
@@ -36,6 +35,9 @@ func main() {
 		log.Fatalf("Failed to perform initial data fetch: %v", err)
 	}
 	log.Println("Initial data fetch complete.")
+
+	// Initialize tradeable pairs immediately after initial fetch
+	globalAPICache.InitializeTradeablePairs()
 
 	globalAPICache.StartBackgroundUpdaters()
 
@@ -128,7 +130,7 @@ func handleQuery(w http.ResponseWriter, r *http.Request) {
 		noResultsItem := commontypes.FlowResult{
 			Title:    "No results found",
 			SubTitle: "Please try a different query.",
-			IcoPath:  noResultsIconPath,
+			IcoPath:  defaultModuleIcon,
 			Score:    0,
 			JsonRPCAction: commontypes.JsonRPCAction{
 				Method:     "Flow.Launcher.ChangeQuery",

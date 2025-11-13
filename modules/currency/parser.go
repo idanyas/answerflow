@@ -15,6 +15,11 @@ type ConversionRequest struct {
 	ToCurrency   string
 }
 
+// Regex to find numbers that may have separators and k/m suffixes.
+var numberWithSuffixRegex = regexp.MustCompile(`[0-9]+(?:[0-9\s ,.]*[0-9])?(?:[km]\b)?`)
+
+// normalizeNumberString cleans up a string that represents a number by removing thousand separators
+// and standardizing the decimal separator. It handles standard and non-breaking spaces.
 func normalizeNumberString(s string) string {
 	s = strings.ReplaceAll(s, " ", "")
 	s = strings.ReplaceAll(s, " ", "") // Handle non-breaking spaces
@@ -34,8 +39,6 @@ func normalizeNumberString(s string) string {
 		if len(parts) > 1 {
 			lastPart := parts[len(parts)-1]
 			// Heuristic: if last part after a comma is 1-3 digits, assume comma was decimal.
-			// This is common in many European locales.
-			// Example: "1,23" -> 1.23; "123,456" -> 123.456 (if single comma); "1,234,567" -> 1234567
 			if len(lastPart) >= 1 && len(lastPart) <= 3 && regexp.MustCompile(`^\d+$`).MatchString(lastPart) {
 				if strings.Count(s, ",") == 1 { // Only one comma, likely decimal
 					firstPart := strings.Join(parts[:len(parts)-1], "")
@@ -47,14 +50,9 @@ func normalizeNumberString(s string) string {
 				s = strings.ReplaceAll(s, ",", "")
 			}
 		}
-		// If a single comma remains and structure is like "X,Y" where Y isn't 1-3 digits, it's treated as X Y (no decimal)
-		// e.g. "1,2345" -> "12345"
 	}
 	return s
 }
-
-// Regex to find numbers that may have separators and k/m suffixes.
-var numberWithSuffixRegex = regexp.MustCompile(`[0-9]+(?:[0-9\s ,.]*[0-9])?(?:[km]\b)?`)
 
 // preprocessAmountExpression normalizes number formats and suffixes (k/m) within an expression string,
 // preparing it for evaluation by the 'expr' library.

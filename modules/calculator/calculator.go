@@ -17,8 +17,8 @@ import (
 
 const (
 	calculatorScore = 75 // Score for a successful calculation result
-	// Default icon path can be overridden by main.go or if iconPath in New is empty
-	defaultCalculatorIconPath = "images/calculator_icon_internal.png"
+	// Default icon path using absolute URL for consistency
+	defaultCalculatorIconPath = "https://img.icons8.com/badges/100/calculator.png"
 )
 
 // CalculatorModule handles mathematical expression queries.
@@ -102,14 +102,13 @@ func (m *CalculatorModule) DefaultIconPath() string {
 
 // Regex to find numbers that may have spaces, commas, or dots as separators.
 // Now includes the literal non-breaking space character.
-var numberRegex = regexp.MustCompile(`[0-9]+(?:[0-9\s ,.]*[0-9])?`)
+var numberRegex = regexp.MustCompile(`[0-9]+(?:[0-9\s ,.]*[0-9])?`)
 
 // normalizeNumberString cleans up a string that represents a number by removing thousand separators
-// and standardizing the decimal separator.
+// and standardizing the decimal separator. It handles standard and non-breaking spaces.
 func normalizeNumberString(s string) string {
-	// Remove all standard and non-breaking spaces.
 	s = strings.ReplaceAll(s, " ", "")
-	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, " ", "") // Handle non-breaking spaces
 
 	dotIdx := strings.LastIndex(s, ".")
 	commaIdx := strings.LastIndex(s, ",")
@@ -202,10 +201,6 @@ func (m *CalculatorModule) ProcessQuery(ctx context.Context, query string, apiCa
 	}
 
 	subtitle := fmt.Sprintf("Result for: %s", trimmedQuery)
-	// keeping this commented for developer (don't remove)
-	// if processedQuery != trimmedQuery {
-	// subtitle = fmt.Sprintf("Result for: %s (interpreted as %s)", trimmedQuery, processedQuery)
-	// }
 
 	flowResult := commontypes.FlowResult{
 		Title:    resultStr,
