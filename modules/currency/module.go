@@ -197,30 +197,36 @@ func (m *CurrencyConverterModule) generateQuickConversions(ctx context.Context, 
 		addResult("EUR", scoreQuickConversion, false)
 
 	case "EUR":
-		addResult("RUB", scoreBaseConversion, false)
-		addResult("USD", scoreReverseConversion, false)
+		// Prioritize inverse "buy" RUB, then sell to USD, then sell to RUB
 		addResult("RUB", scoreInverseConversion, true)
+		addResult("USD", scoreReverseConversion, false)
+		addResult("RUB", scoreBaseConversion, false)
 
 	default:
 		// For all other currencies (fiats, cryptos)
-		// PRIORITY: Buy (inverse RUB) first, then sell conversions
+		// Conversion priorities are:
+		// 1. How much RUB is needed to buy the source currency (inverse, "buy")
+		// 2. How much USD the source currency converts to (base, "sell")
+		// 3. How much EUR the source currency converts to (quick, "sell")
 
-		// 1. HIGHEST PRIORITY: Inverse RUB (buy tag) - how much RUB to buy this currency
+		// 1. HIGHEST PRIORITY: Inverse RUB (buy tag)
 		if req.FromCurrency != "RUB" && !seen[fmt.Sprintf("%s->%s:true", req.FromCurrency, "RUB")] {
-			addResult("RUB", 95, true) // Highest score for buy
+			addResult("RUB", 95, true) // Highest score for "buy"
 		}
+
+		// DEV NOTE: The "sell to RUB" option was hidden per user request.
+		// To re-enable it, simply remove the surrounding block comment characters (`/*` and `*/`).
+		// 2. Forward RUB (sell tag)
+		// if req.FromCurrency != "RUB" && !seen[fmt.Sprintf("%s->%s:false", req.FromCurrency, "RUB")] {
+		// 	addResult("RUB", 92, false) // High score for "sell to RUB", to appear before base USD
+		// }
 
 		// 2. Base conversion (usually USD)
 		if m.baseConversionCurrency != "" && m.baseConversionCurrency != req.FromCurrency {
 			addResult(m.baseConversionCurrency, scoreBaseConversion, false)
 		}
 
-		// 3. Forward RUB (sell tag) - convert foreign currency to RUB
-		if req.FromCurrency != "RUB" && !seen[fmt.Sprintf("%s->%s:false", req.FromCurrency, "RUB")] {
-			addResult("RUB", 85, false) // Between base and quick conversions
-		}
-
-		// 4. Quick conversion targets (e.g., EUR)
+		// 3. Quick conversion targets (e.g., EUR)
 		for _, target := range m.quickConversionTargets {
 			if target != req.FromCurrency && !seen[fmt.Sprintf("%s->%s:false", req.FromCurrency, target)] {
 				addResult(target, scoreQuickConversion, false)

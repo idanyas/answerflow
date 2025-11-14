@@ -1,3 +1,4 @@
+// modules/currency/config.go
 package currency
 
 import (
@@ -92,9 +93,9 @@ const (
 const (
 	scoreSpecificConversion = 100
 	scoreBaseConversion     = 90
-	scoreReverseConversion  = 85
+	scoreReverseConversion  = 95 // Prioritize inverse "buy" operations for RUB/USD
 	scoreQuickConversion    = 80
-	scoreInverseConversion  = 75
+	scoreInverseConversion  = 95 // Prioritize inverse "buy" operations for EUR
 )
 
 // Cache settings

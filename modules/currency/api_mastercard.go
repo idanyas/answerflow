@@ -66,8 +66,8 @@ func (af *adaptiveFetcher) adjustConcurrency() {
 	successRate := float64(success) / float64(total)
 	current := af.currentWorkers.Load()
 
-	// Increase workers if success rate > 90% and current < 5
-	if successRate > 0.9 && current < 5 {
+	// Increase workers if success rate > 90% and current < 7
+	if successRate > 0.9 && current < 7 {
 		af.currentWorkers.Store(current + 1)
 		log.Printf("Adaptive: Increasing workers to %d (success rate: %.1f%%)", current+1, successRate*100)
 	}

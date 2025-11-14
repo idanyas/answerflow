@@ -1,3 +1,4 @@
+// modules/currency/result_formatter.go
 package currency
 
 import (
@@ -68,10 +69,8 @@ func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCur
 }
 
 func (m *CurrencyConverterModule) formatInverseResult(sourceAmount float64, sourceCurrency string, targetAmount float64, targetCurrency string, score int) *commontypes.FlowResult {
-	// marketRate represents the exchange rate between currencies
-	// For inverse: we calculated sourceAmount needed to get targetAmount
-	// Example: 1.32 USD needed for 100 RUB means rate = 100/1.32 = 75.76 RUB per USD
-	marketRate := targetAmount / sourceAmount
+	// For inverse, we calculated sourceAmount to get targetAmount. The rate is how much source is needed for 1 unit of target.
+	marketRate := sourceAmount / targetAmount
 
 	hasRubSource := sourceCurrency == "RUB"
 	hasRubTarget := targetCurrency == "RUB"
@@ -96,17 +95,16 @@ func (m *CurrencyConverterModule) formatInverseResult(sourceAmount float64, sour
 	if (hasRubSource || hasRubTarget) && (hasUsdSource || hasUsdTarget) {
 		// Special display for RUB<->USD: always show "1 USD = X RUB"
 		if hasRubSource && hasUsdTarget {
-			// RUB -> USD: marketRate = targetUSD / sourceRUB, so 1 USD = 1/marketRate RUB
-			rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(1.0/marketRate))
+			// source is RUB, target is USD. marketRate is RUB/USD. Correct for display.
+			rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(marketRate))
 		} else if hasUsdSource && hasRubTarget {
-			// USD -> RUB: marketRate = targetRUB / sourceUSD, so 1 USD = marketRate RUB
-			rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(marketRate))
-		} else if hasRubTarget && hasUsdSource {
-			rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(marketRate))
-		} else if hasRubSource && hasUsdTarget {
-			rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(1.0/marketRate))
+			// source is USD, target is RUB. marketRate is USD/RUB. Need to invert for display.
+			if marketRate > 0 {
+				rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(1.0/marketRate))
+			}
 		}
 	} else if marketRate > 0 && !math.IsNaN(marketRate) && !math.IsInf(marketRate, 0) {
+		// Rate should be "1 TARGET = X SOURCE"
 		rateStr = fmt.Sprintf("1 %s = %s %s", targetCurrency, formatRate(marketRate), sourceCurrency)
 	}
 
