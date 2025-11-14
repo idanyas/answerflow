@@ -24,16 +24,35 @@ func (ac *APICache) CalculateAverageExecutionPrice(symbol string, amount float64
 		orderBook = rate.OrderBookBids
 	}
 
-	orderBookCopy := make([][]float64, len(orderBook))
-	for i, level := range orderBook {
+	// Validate order book before processing
+	if orderBook == nil {
+		ac.mu.RUnlock()
+		return 0, fmt.Errorf("order book is nil")
+	}
+
+	// Build copy and calculate approximate USD value for threshold selection
+	orderBookCopy := make([][]float64, 0, len(orderBook))
+	var approximateUSDValue float64
+
+	for _, level := range orderBook {
 		if len(level) >= 2 {
-			orderBookCopy[i] = []float64{level[0], level[1]}
+			orderBookCopy = append(orderBookCopy, []float64{level[0], level[1]})
+			// Use first level price for USD approximation
+			if approximateUSDValue == 0 {
+				approximateUSDValue = amount * level[0]
+			}
 		}
 	}
 	ac.mu.RUnlock()
 
 	if len(orderBookCopy) == 0 {
 		return 0, fmt.Errorf("empty order book")
+	}
+
+	// Select liquidity threshold based on USD value of the trade
+	minFillRatio := liquidityToleranceRelaxed
+	if shouldUseOrderBookByUSD(approximateUSDValue) {
+		minFillRatio = liquidityToleranceStrict
 	}
 
 	totalFilled := 0.0
@@ -64,16 +83,11 @@ func (ac *APICache) CalculateAverageExecutionPrice(symbol string, amount float64
 		}
 	}
 
-	tolerance := liquidityToleranceRelaxed
-	if amount > minLargeOrderUSDT {
-		tolerance = liquidityToleranceStrict
+	if totalFilled < amount*minFillRatio {
+		return 0, fmt.Errorf("insufficient liquidity: can fill %.2f%% of order", totalFilled/amount*100)
 	}
 
-	if totalFilled < amount*tolerance {
-		return 0, fmt.Errorf("insufficient liquidity")
-	}
-
-	if !isValidFloat(totalFilled) {
+	if !isValidFloat(totalFilled) || totalFilled <= 0 {
 		return 0, fmt.Errorf("no liquidity")
 	}
 
@@ -98,10 +112,15 @@ func (ac *APICache) CalculateBuyAmountWithUSDT(symbol string, usdtAmount float64
 	}
 
 	orderBook := rate.OrderBookAsks
-	orderBookCopy := make([][]float64, len(orderBook))
-	for i, level := range orderBook {
+	if orderBook == nil {
+		ac.mu.RUnlock()
+		return 0, 0, fmt.Errorf("order book is nil")
+	}
+
+	orderBookCopy := make([][]float64, 0, len(orderBook))
+	for _, level := range orderBook {
 		if len(level) >= 2 {
-			orderBookCopy[i] = []float64{level[0], level[1]}
+			orderBookCopy = append(orderBookCopy, []float64{level[0], level[1]})
 		}
 	}
 	ac.mu.RUnlock()
@@ -145,7 +164,7 @@ func (ac *APICache) CalculateBuyAmountWithUSDT(symbol string, usdtAmount float64
 			avgPrice := totalUSDTSpent / totalCryptoReceived
 			return totalCryptoReceived, avgPrice, nil
 		}
-		return 0, 0, fmt.Errorf("insufficient liquidity")
+		return 0, 0, fmt.Errorf("insufficient liquidity: can spend %.2f%% of USDT", totalUSDTSpent/usdtAmount*100)
 	}
 
 	if !isValidFloat(totalCryptoReceived) || totalCryptoReceived <= 0 {

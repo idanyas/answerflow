@@ -28,8 +28,11 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
 
 output.md
 output_*.md
+
+# Data directory for persisted cache
+data/

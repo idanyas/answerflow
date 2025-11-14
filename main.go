@@ -17,7 +17,7 @@ import (
 
 const (
 	httpPort             = ":8080"
-	requestTimeout       = 5 * time.Second
+	requestTimeout       = 20 * time.Second // Increased from 5s to accommodate API calls
 	defaultModuleIcon    = "https://img.icons8.com/badges/100/decision.png"
 	currencyModuleIcon   = "https://img.icons8.com/badges/100/euro-exchange.png"
 	calculatorModuleIcon = "https://img.icons8.com/badges/100/calculator.png"

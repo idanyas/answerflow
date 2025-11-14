@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -28,93 +29,71 @@ type whitebirdCalculation struct {
 type whitebirdResponse struct {
 	Rate struct {
 		PlainRatio string `json:"plainRatio"`
-		Ratio      string `json:"ratio"`
+		Ratio      string `json:"ratio"` // Effective rate with fees included
 	} `json:"rate"`
 	Calculation struct {
 		OutputAsset string `json:"outputAsset"`
 	} `json:"calculation"`
+	Limit struct {
+		Min *float64 `json:"min"`
+		Max *float64 `json:"max"`
+	} `json:"limit"`
+	OperationStatus struct {
+		Enabled bool   `json:"enabled"`
+		Status  string `json:"status"`
+	} `json:"operationStatus"`
 }
 
-func (ac *APICache) fetchWhitebirdRates() error {
-	if !whitebirdCircuit.CanAttempt() {
-		return fmt.Errorf("circuit breaker open")
+// GetWhitebirdRateForAmount fetches the Whitebird exchange rate for a specific amount.
+// This is essential because Whitebird rates are non-linear (vary with amount).
+// Returns the amount of target currency received (not the rate).
+func (ac *APICache) GetWhitebirdRateForAmount(from, to string, amount float64) (float64, error) {
+	// FIXED: Validate amount before making API call
+	if err := ValidateAmount(amount); err != nil {
+		return 0, fmt.Errorf("invalid amount: %w", err)
 	}
 
-	log.Println("Fetching Whitebird rates...")
-	ctx, cancel := context.WithTimeout(context.Background(), whitebirdAPITimeout*2)
+	if !whitebirdCircuit.CanAttempt() {
+		ac.mu.Lock()
+		ac.whitebirdStatus.Available = false
+		ac.mu.Unlock()
+		return 0, fmt.Errorf("whitebird service temporarily unavailable")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), whitebirdAPITimeout)
 	defer cancel()
 
-	pairs := []struct{ from, to string }{
-		{"RUB", "TON"},
-		{"TON", "RUB"},
-	}
-
-	fetchedRates := make(map[string]float64)
-	const amount = 10000.0
-
-	for _, pair := range pairs {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		rate, err := ac.fetchSingleWhitebirdRate(ctx, pair.from, pair.to, amount)
-		if err != nil {
-			log.Printf("Warning: Whitebird %s->%s failed: %v", pair.from, pair.to, err)
-			whitebirdCircuit.RecordFailure()
-			continue
-		}
-
-		var key string
-		if pair.from == "RUB" && pair.to == "TON" {
-			key = "RUB_TON_BUY"
-		} else if pair.from == "TON" && pair.to == "RUB" {
-			key = "TON_RUB_SELL"
-		}
-		fetchedRates[key] = rate
-
-		log.Printf("Whitebird %s: rate=%f", key, rate)
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	if len(fetchedRates) == 0 {
+	outputAmount, err := ac.fetchSingleWhitebirdConversion(ctx, from, to, amount)
+	if err != nil {
 		whitebirdCircuit.RecordFailure()
-		return fmt.Errorf("all fetches failed")
+		ac.mu.Lock()
+		ac.whitebirdStatus.Available = false
+		ac.whitebirdStatus.LastError = err
+		ac.whitebirdStatus.ConsecutiveFails++
+		ac.mu.Unlock()
+		return 0, fmt.Errorf("failed to get exchange rate: %w", err)
 	}
 
 	whitebirdCircuit.RecordSuccess()
+	ac.mu.Lock()
+	ac.whitebirdStatus.Available = true
+	ac.whitebirdStatus.LastError = nil
+	ac.whitebirdStatus.ConsecutiveFails = 0
+	ac.whitebirdStatus.LastUpdate = time.Now()
+	ac.mu.Unlock()
 
-	hasChanges := false
-	for key, rate := range fetchedRates {
-		if oldRate, ok := ac.lastWhitebirdRates[key]; !ok || !floatEquals(oldRate, rate) {
-			hasChanges = true
-			break
-		}
-	}
-
-	if hasChanges {
-		ac.mu.Lock()
-		for key, rate := range fetchedRates {
-			ac.whitebirdRates[key] = rate
-			ac.lastWhitebirdRates[key] = rate
-		}
-		ac.whitebirdLastUpdate = time.Now()
-		ac.mu.Unlock()
-
-		if !ac.ValidateWhitebirdRates() {
-			log.Printf("Warning: Whitebird rates validation failed")
-		} else {
-			log.Printf("Whitebird rates updated: %d rates", len(fetchedRates))
-		}
-	}
-
-	return nil
+	return outputAmount, nil
 }
 
-func (ac *APICache) fetchSingleWhitebirdRate(ctx context.Context, from, to string, amount float64) (float64, error) {
+func (ac *APICache) fetchSingleWhitebirdConversion(ctx context.Context, from, to string, amount float64) (float64, error) {
 	if err := whitebirdLimiter.Wait(ctx); err != nil {
 		return 0, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
 	}
 
 	payload := whitebirdRequestPayload{
@@ -145,28 +124,43 @@ func (ac *APICache) fetchSingleWhitebirdRate(ctx context.Context, from, to strin
 		return 0, fmt.Errorf("status %s", resp.Status)
 	}
 
+	// Limit response body size
+	limitedReader := io.LimitReader(resp.Body, maxHTTPResponseSize)
+
 	var wbResp whitebirdResponse
-	if err := json.NewDecoder(resp.Body).Decode(&wbResp); err != nil {
-		return 0, err
+	if err := json.NewDecoder(limitedReader).Decode(&wbResp); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Check if operation is enabled first (fail fast)
+	if !wbResp.OperationStatus.Enabled {
+		return 0, fmt.Errorf("operation not enabled: %s", wbResp.OperationStatus.Status)
+	}
+
+	// Validate response
+	if wbResp.Calculation.OutputAsset == "" {
+		return 0, fmt.Errorf("empty output asset in response")
+	}
+
+	// Check amount limits if present
+	if wbResp.Limit.Min != nil && amount < *wbResp.Limit.Min {
+		return 0, fmt.Errorf("amount %.2f is below minimum limit %.2f", amount, *wbResp.Limit.Min)
+	}
+	if wbResp.Limit.Max != nil && amount > *wbResp.Limit.Max {
+		return 0, fmt.Errorf("amount %.2f exceeds maximum limit %.2f", amount, *wbResp.Limit.Max)
 	}
 
 	outputAmount, err := strconv.ParseFloat(wbResp.Calculation.OutputAsset, 64)
-	if err != nil || !isValidFloat(outputAmount) {
-		return 0, fmt.Errorf("invalid output")
+	if err != nil {
+		return 0, fmt.Errorf("invalid output amount: %s", wbResp.Calculation.OutputAsset)
 	}
 
-	var effectiveRate float64
-	if from == "RUB" && to == "TON" {
-		effectiveRate = amount / outputAmount
-	} else if from == "TON" && to == "RUB" {
-		effectiveRate = outputAmount / amount
-	} else {
-		return 0, fmt.Errorf("unsupported pair")
+	if !isValidFloat(outputAmount) || outputAmount <= 0 {
+		return 0, fmt.Errorf("invalid output amount: %f", outputAmount)
 	}
 
-	if effectiveRate < whitebirdRateMin || effectiveRate > whitebirdRateMax {
-		return 0, fmt.Errorf("rate outside valid range")
-	}
+	// Log the conversion for debugging
+	log.Printf("Whitebird %s->%s: input=%.6f, output=%.6f", from, to, amount, outputAmount)
 
-	return effectiveRate, nil
+	return outputAmount, nil
 }

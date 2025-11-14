@@ -54,16 +54,16 @@ func NewCalculatorModule(iconPath string) *CalculatorModule {
 		"min":   func(x, y float64) float64 { return math.Min(x, y) },
 		"max":   func(x, y float64) float64 { return math.Max(x, y) },
 		"mod":   func(x, y float64) float64 { return math.Mod(x, y) },
-		"fact": func(n int) (int, error) {
+		"fact": func(n int) (int64, error) {
 			if n < 0 {
 				return 0, fmt.Errorf("factorial undefined for negative")
 			}
 			if n > 20 {
 				return 0, fmt.Errorf("factorial too large")
 			}
-			res := 1
+			var res int64 = 1
 			for i := 2; i <= n; i++ {
-				res *= i
+				res *= int64(i)
 			}
 			return res, nil
 		},
@@ -89,41 +89,9 @@ func (m *CalculatorModule) DefaultIconPath() string {
 
 var numberRegex = regexp.MustCompile(`[0-9]+(?:[0-9\s ,.]*[0-9])?`)
 
-func normalizeNumberString(s string) string {
-	s = strings.ReplaceAll(s, " ", "")
-	s = strings.ReplaceAll(s, " ", "")
-
-	dotIdx := strings.LastIndex(s, ".")
-	commaIdx := strings.LastIndex(s, ",")
-
-	if dotIdx != -1 && commaIdx != -1 {
-		if commaIdx > dotIdx {
-			s = strings.ReplaceAll(s, ".", "")
-			s = strings.Replace(s, ",", ".", 1)
-		} else {
-			s = strings.ReplaceAll(s, ",", "")
-		}
-	} else if commaIdx != -1 {
-		parts := strings.Split(s, ",")
-		if len(parts) > 1 {
-			lastPart := parts[len(parts)-1]
-			if len(lastPart) >= 1 && len(lastPart) <= 3 && regexp.MustCompile(`^\d+$`).MatchString(lastPart) {
-				if strings.Count(s, ",") == 1 {
-					s = strings.Join(parts[:len(parts)-1], "") + "." + lastPart
-				} else {
-					s = strings.ReplaceAll(s, ",", "")
-				}
-			} else {
-				s = strings.ReplaceAll(s, ",", "")
-			}
-		}
-	}
-	return s
-}
-
 func preprocessQuery(query string) string {
 	processed := strings.ReplaceAll(query, "%", "/100.0")
-	processed = numberRegex.ReplaceAllStringFunc(processed, normalizeNumberString)
+	processed = numberRegex.ReplaceAllStringFunc(processed, currency.NormalizeNumberString)
 	return processed
 }
 

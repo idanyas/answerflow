@@ -2,7 +2,6 @@ package currency
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/expr-lang/expr"
@@ -12,38 +11,6 @@ type ConversionRequest struct {
 	Amount       float64
 	FromCurrency string
 	ToCurrency   string
-}
-
-func normalizeNumberString(s string) string {
-	s = strings.ReplaceAll(s, " ", "")
-	s = strings.ReplaceAll(s, " ", "")
-
-	dotIdx := strings.LastIndex(s, ".")
-	commaIdx := strings.LastIndex(s, ",")
-
-	if dotIdx != -1 && commaIdx != -1 {
-		if commaIdx > dotIdx {
-			s = strings.ReplaceAll(s, ".", "")
-			s = strings.Replace(s, ",", ".", 1)
-		} else {
-			s = strings.ReplaceAll(s, ",", "")
-		}
-	} else if commaIdx != -1 {
-		parts := strings.Split(s, ",")
-		if len(parts) > 1 {
-			lastPart := parts[len(parts)-1]
-			if len(lastPart) >= 1 && len(lastPart) <= 3 && regexp.MustCompile(`^\d+$`).MatchString(lastPart) {
-				if strings.Count(s, ",") == 1 {
-					s = strings.Join(parts[:len(parts)-1], "") + "." + lastPart
-				} else {
-					s = strings.ReplaceAll(s, ",", "")
-				}
-			} else {
-				s = strings.ReplaceAll(s, ",", "")
-			}
-		}
-	}
-	return s
 }
 
 func preprocessAmountExpression(exprStr string) string {
@@ -57,12 +24,18 @@ func preprocessAmountExpression(exprStr string) string {
 			multiplier = "*1000000"
 			numPart = strings.TrimSuffix(numPart, "m")
 		}
-		return normalizeNumberString(numPart) + multiplier
+		return NormalizeNumberString(numPart) + multiplier
 	})
 }
 
 func evaluateAmountExpression(expressionStr string) (float64, error) {
 	cleanExpr := strings.ToLower(strings.TrimSpace(expressionStr))
+
+	// Input validation: check length
+	if len(cleanExpr) > maxExpressionLength {
+		return 0, fmt.Errorf("expression too long")
+	}
+
 	knownSymbols := []string{"us$", "a$", "c$", "nz$", "hk$", "s$", "cn¥", "tl", "zł", "zl", "nok", "dkk", "$", "€", "₽", "¥", "£", "kr", "฿", "r", "₫", "₩"}
 	for _, sym := range knownSymbols {
 		cleanExpr = strings.ReplaceAll(cleanExpr, strings.ToLower(sym), "")

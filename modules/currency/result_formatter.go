@@ -7,7 +7,7 @@ import (
 	"answerflow/commontypes"
 )
 
-func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCurrency string, finalAmount, displayRate float64, score int, slippageInfo string) *commontypes.FlowResult {
+func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCurrency string, finalAmount, displayRate float64, score int, slippageInfo string, feesInfo string) *commontypes.FlowResult {
 	var title, subTitle string
 
 	hasRubFrom := req.FromCurrency == "RUB"
@@ -15,16 +15,20 @@ func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCur
 	hasUsdFrom := req.FromCurrency == "USD" || req.FromCurrency == "USDT"
 	hasUsdTo := targetCurrency == "USD" || targetCurrency == "USDT"
 
+	// ALWAYS determine buy/sell tag based on RUB relationship
 	var tag string
-	if (hasRubFrom && hasUsdTo) || (hasUsdFrom && hasRubTo) {
-		if hasRubFrom && hasUsdTo {
-			tag = " 🏷️ продать"
-		} else if hasUsdFrom && hasRubTo {
-			tag = " 🛍️ купить"
-		}
+	if hasRubFrom {
+		// FROM RUB: buying foreign currency
+		tag = " 🛍️ купить"
+	} else if hasRubTo {
+		// TO RUB: selling foreign currency for RUB
+		tag = " 🏷️ продать"
+	} else {
+		// Foreign to Foreign: selling foreign currency (could ultimately be sold to RUB)
+		tag = " 🏷️ продать"
 	}
 
-	clipboardText := formatAmountForClipboard(finalAmount, targetCurrency)
+	clipboardText := fmt.Sprintf("%s %s", formatAmountForClipboard(finalAmount, targetCurrency), targetCurrency)
 	formattedAmount := formatAmount(finalAmount, targetCurrency)
 
 	if m.ShortDisplayFormat {
@@ -35,8 +39,10 @@ func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCur
 			formattedAmount, targetCurrency)
 	}
 
+	// Rate display with special handling for RUB<->USD pairs
 	var rateStr string
 	if (hasRubFrom || hasRubTo) && (hasUsdFrom || hasUsdTo) {
+		// Special display for RUB<->USD: always show "1 USD = X RUB"
 		if hasRubFrom && hasUsdTo {
 			if displayRate > 0 {
 				rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(1.0/displayRate))
@@ -48,7 +54,7 @@ func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCur
 		rateStr = fmt.Sprintf("1 %s = %s %s", req.FromCurrency, formatRate(displayRate), targetCurrency)
 	}
 
-	subTitle = rateStr + tag + slippageInfo
+	subTitle = rateStr + tag + slippageInfo + feesInfo
 
 	return &commontypes.FlowResult{
 		Title:    title,
@@ -62,25 +68,49 @@ func (m *CurrencyConverterModule) formatResult(req *ConversionRequest, targetCur
 }
 
 func (m *CurrencyConverterModule) formatInverseResult(sourceAmount float64, sourceCurrency string, targetAmount float64, targetCurrency string, score int) *commontypes.FlowResult {
-	marketRate := sourceAmount / targetAmount
+	// marketRate represents the exchange rate between currencies
+	// For inverse: we calculated sourceAmount needed to get targetAmount
+	// Example: 1.32 USD needed for 100 RUB means rate = 100/1.32 = 75.76 RUB per USD
+	marketRate := targetAmount / sourceAmount
 
-	hasRub := sourceCurrency == "RUB" || targetCurrency == "RUB"
-	hasUsd := sourceCurrency == "USD" || sourceCurrency == "USDT" || targetCurrency == "USD" || targetCurrency == "USDT"
+	hasRubSource := sourceCurrency == "RUB"
+	hasRubTarget := targetCurrency == "RUB"
+	hasUsdSource := sourceCurrency == "USD" || sourceCurrency == "USDT"
+	hasUsdTarget := targetCurrency == "USD" || targetCurrency == "USDT"
 
-	var tag, rateStr string
-	if hasRub && hasUsd {
-		if sourceCurrency == "USD" && targetCurrency == "RUB" {
-			tag = " 🛍️ купить"
-			rateStr = fmt.Sprintf("1 RUB = %s USD", formatRate(1.0/marketRate))
-		} else if sourceCurrency == "RUB" && targetCurrency == "USD" {
-			tag = " 🏷️ продать"
+	// ALWAYS determine buy/sell tag based on RUB relationship
+	var tag string
+	if hasRubSource {
+		// Source is RUB: spending RUB to buy foreign currency
+		tag = " 🛍️ купить"
+	} else if hasRubTarget {
+		// Target is RUB: getting RUB from foreign currency
+		tag = " 🏷️ продать"
+	} else {
+		// Foreign to foreign inverse: buying foreign currency (would need RUB first)
+		tag = " 🛍️ купить"
+	}
+
+	// Rate display with special handling for RUB<->USD pairs
+	var rateStr string
+	if (hasRubSource || hasRubTarget) && (hasUsdSource || hasUsdTarget) {
+		// Special display for RUB<->USD: always show "1 USD = X RUB"
+		if hasRubSource && hasUsdTarget {
+			// RUB -> USD: marketRate = targetUSD / sourceRUB, so 1 USD = 1/marketRate RUB
+			rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(1.0/marketRate))
+		} else if hasUsdSource && hasRubTarget {
+			// USD -> RUB: marketRate = targetRUB / sourceUSD, so 1 USD = marketRate RUB
 			rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(marketRate))
+		} else if hasRubTarget && hasUsdSource {
+			rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(marketRate))
+		} else if hasRubSource && hasUsdTarget {
+			rateStr = fmt.Sprintf("1 USD = %s RUB", formatRate(1.0/marketRate))
 		}
 	} else if marketRate > 0 && !math.IsNaN(marketRate) && !math.IsInf(marketRate, 0) {
 		rateStr = fmt.Sprintf("1 %s = %s %s", targetCurrency, formatRate(marketRate), sourceCurrency)
 	}
 
-	clipboardText := formatAmountForClipboard(sourceAmount, sourceCurrency)
+	clipboardText := fmt.Sprintf("%s %s", formatAmountForClipboard(sourceAmount, sourceCurrency), sourceCurrency)
 	formattedSource := formatAmount(sourceAmount, sourceCurrency)
 
 	var title string

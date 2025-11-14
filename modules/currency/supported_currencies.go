@@ -3,12 +3,66 @@ package currency
 // This file contains the lists of supported crypto and fiat currencies.
 
 // Crypto currencies supported and fetched from Bybit
+// Extended to include all symbols specified in the requirements.
 var supportedCryptos = []string{
-	"TON", "BTC", "ETH", "SOL", "ADA", "DOGE", "XRP", "DOT", "LINK", "UNI",
-	"ATOM", "AVAX", "NEAR", "APT", "ARB", "OP", "USDT",
+	"TON", "BTC", "ETH", "XRP", "DOT", "XLM", "LTC", "DOGE", "CHZ", "AXS", "MANA",
+	"DYDX", "COMP", "AAVE", "YFI", "LINK", "SUSHI", "UNI", "KSM", "ICP", "ADA",
+	"ETC", "XTZ", "BCH", "QNT", "USDC", "GRT", "SOL", "FIL", "BAT", "ZRX", "CRV",
+	"AGLD", "ANKR", "PERP", "WAVES", "LUNC", "SPELL", "SHIB", "ATOM", "ALGO",
+	"ENJ", "SAND", "AVAX", "WOO", "FTT", "GODS", "IMX", "ENS", "CAKE", "STETH",
+	"SLP", "C98", "AVA", "ONE", "BOBA", "JASMY", "GALA", "TRVL", "WEMIX", "XEM",
+	"BICO", "UMA", "NEXO", "SNX", "1INCH", "TEL", "SIS", "LRC", "LDO", "IZI",
+	"QTUM", "ZEN", "THETA", "MX", "DGB", "RVN", "EGLD", "RUNE", "XEC", "ICX",
+	"XDC", "HNT", "ZIL", "HBAR", "FLOW", "KASTA", "STX", "SIDUS", "LOOKS", "DAI",
+	"MV", "RSS3", "GMX", "ACH", "JST", "SUN", "BTT", "TRX", "NFT", "SCRT",
+	"PSTAKE", "USTC", "BNB", "NEAR", "SD", "APE", "FIDA", "MINA", "SC", "RACA",
+	"GLMR", "MOVR", "WBTC", "XAVA", "GMT", "CELO", "SFUND", "APEX", "CTC",
+	"FITFI", "USDD", "OP", "LUNA", "VINU", "BEL", "FORT", "FLOKI", "BABYDOGE",
+	"WAXP", "AR", "ROSE", "PSG", "JUV", "INTER", "AFC", "CITY", "SOLO", "SWEAT",
+	"ETHW", "INJ", "MPLX", "APT", "MCRT", "MASK", "HFT", "PEOPLE", "TWT", "ORT",
+	"HOOK", "OAS", "MAGIC", "MEE", "BONK", "FLR", "TIME", "RPL", "SSV", "FXS",
+	"CORE", "RDNT", "BLUR", "MDAO", "ACS", "PRIME", "VRA", "ID", "ARB", "XCAD",
+	"MBX", "AXL", "CGPT", "AGI", "SUI", "MVL", "PEPE", "LADYS", "LMWR", "TURBOS",
+	"VELO", "PENDLE", "NYM", "MNT", "ARKM", "NEON", "WLD", "SEI", "CYBER", "ORDI",
+	"KAVA", "PYUSD", "KAS", "FET", "ZTX", "JEFF", "TUSD", "BEAM", "POL", "TIA",
+	"TOKEN", "MEME", "SHRAP", "FLIP", "ROOT", "PYTH", "KUB", "KCS", "VANRY",
+	"INSP", "JTO", "METH", "CBK", "ZIG", "TRC", "MYRIA", "MBOX", "ARTY", "COQ",
+	"AIOZ", "VIC", "RATS", "SATS", "PORT3", "XAI", "ONDO", "SQR", "SAROS", "USDY",
+	"MANTA", "MYRO", "GTAI", "DMAIL", "DYM", "ZETA", "JUP", "MAVIA", "PURSE",
+	"ALT", "HTX", "CSPR", "STRK", "CPOOL", "QORPO", "PORTAL", "SCA", "AEVO",
+	"NIBI", "BOME", "VENOM", "ZKJ", "ETHFI", "NAKA", "WEN", "DEGEN", "ENA",
+	"USDE", "W", "G3", "ESE", "TNSR", "MASA", "FOXY", "PRCL", "BRETT", "MEW",
+	"MERL", "LL", "SAFE", "WIF", "SVL", "KMNO", "ZENT", "TAI", "MODE", "SPEC",
+	"PONKE", "BB", "CTA", "NOT", "DRIFT", "SQD", "MONPRO", "MOG", "TAIKO",
+	"ULTI", "AURORA", "IO", "ATH", "COOKIE", "PIRATE", "ZK", "POPCAT", "ZRO",
+	"NRN", "ZEX", "BLAST", "MOCA", "UXLINK", "A8", "CLOUD", "ZKL", "AVAIL", "L3",
+	"RENDER", "G", "DOGS", "ORDER", "SUNDOG", "CATI", "HMSTR", "EIGEN", "NAVX",
+	"BBSOL", "CARV", "DEEP", "PUFFER", "DBR", "PUFF", "SCR", "X", "COOK",
+	"GRASS", "KAIA", "SWELL", "NS", "GOAT", "CMETH", "MORPHO", "NEIROCTO", "BAN",
+	"OL", "VIRTUAL", "MAJOR", "MEMEFI", "PNUT", "SPX", "ZRC", "CHILLGUY",
+	"SUPRA", "PAAL", "F", "HPOS10I", "XION", "MOVE", "ME", "ZEREBRO", "SEND",
+	"AERO", "STREAM", "VANA", "LUNAI", "PENGU", "FLUID", "FUEL", "ODOS", "ALCH",
+	"FLOCK", "SONIC", "SERAPH", "LAVA", "XTER", "GAME", "AIXBT", "J", "S", "BMT",
+	"TOSHI", "GPS", "SOLV", "OBT", "SOSO", "TRUMP", "PLUME", "ANIME", "LAYER",
+	"PINEYE", "BERA", "AVL", "B3", "DIAM", "IP", "OM", "USDTB", "ROAM", "ELX",
+	"RED", "PELL", "BR", "VVV", "USDQ", "WAL", "AMI", "PARTI", "CORN", "KILO",
+	"PUMPBTC", "USDR", "FHE", "BABY1", "XAUT", "VET", "VTHO", "WCT", "EPT",
+	"DOLO", "HYPER", "ZORA", "INIT", "SIGN", "HAEDAL", "MILK", "OBOL", "SXT",
+	"DOOD", "NXPC", "HUMA", "ELDE", "AO", "A", "ASRR", "BDXN", "LA", "CUDIS",
+	"RESOLV", "SKATE", "HOME", "BOMB", "SPK", "H", "NEWT", "XO", "SAHARA",
+	"ICNT", "FRAG", "NVDAX", "COINX", "AAPLX", "CRCLX", "METAX", "HOODX",
+	"AMZNX", "GOOGLX", "USD1", "MCDX", "TSLAX", "HYPE", "TAC", "PUMP", "ES",
+	"ERA", "TA", "CAT", "TREE", "TUNA", "TOWNS", "PROVE", "K", "CAMP", "CFG",
+	"SHARDS", "WLFI", "SOMI", "SKY", "U", "AVNT", "ART", "LINEA", "XUSD", "HOLO",
+	"ZKC", "PORTALS", "BARD", "LBTC", "ASTER", "XPL", "0G", "XAN", "RLUSD", "FF",
+	"2Z", "NOM", "ENSO", "YB", "RECALL", "ZBT", "MET", "COMMON", "SYND", "EAT",
+	"MMT", "LITKEY", "CC",
+	// Core bridge and stable tokens:
+	"USDT",
 }
 
 // Fiat currencies supported by Mastercard
+// RUB is REMOVED from this list as it only works via Whitebird, not Mastercard
 var supportedFiats = []string{
 	"AFN", "ALL", "DZD", "AOA", "ARS", "AMD", "AWG", "AUD", "AZN", "BSD", "BHD", "BDT", "BBD", "BYN", "BZD",
 	"BMD", "BTN", "BOB", "BAM", "BWP", "BRL", "BND", "BGN", "BIF", "KHR", "CAD", "CVE", "XCG", "KYD", "XOF",
@@ -20,8 +74,4 @@ var supportedFiats = []string{
 	"PHP", "PLN", "QAR", "RON", "RWF", "SHP", "WST", "STN", "SAR", "RSD", "SCR", "SLE", "SGD", "SBD", "SOS",
 	"ZAR", "KRW", "SSP", "LKR", "SDG", "SRD", "SZL", "SEK", "CHF", "TWD", "TJS", "TZS", "THB", "TOP", "TTD",
 	"TND", "TRY", "TMT", "UGX", "UAH", "AED", "USD", "UYU", "UZS", "VUV", "VES", "VND", "YER", "ZMW", "ZWG",
-	"RUB", // Add RUB to fiat list
 }
-
-// Priority fiat currencies for initial fetch
-var priorityFiats = []string{"EUR", "GBP", "JPY", "CNY", "CHF", "CAD", "AUD", "UAH", "TRY", "KRW"}
