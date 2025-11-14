@@ -5,17 +5,16 @@ import (
 	"math"
 )
 
-// CalculateAverageExecutionPrice calculates the average price for executing a trade of given size
 func (ac *APICache) CalculateAverageExecutionPrice(symbol string, amount float64, isBuy bool) (float64, error) {
 	if !isValidFloat(amount) {
-		return 0, fmt.Errorf("invalid amount: %f", amount)
+		return 0, fmt.Errorf("invalid amount")
 	}
 
 	ac.mu.RLock()
 	rate, ok := ac.bybitRates[symbol]
 	if !ok || rate == nil {
 		ac.mu.RUnlock()
-		return 0, fmt.Errorf("rate not available for %s", symbol)
+		return 0, fmt.Errorf("rate not available")
 	}
 
 	var orderBook [][]float64
@@ -25,7 +24,6 @@ func (ac *APICache) CalculateAverageExecutionPrice(symbol string, amount float64
 		orderBook = rate.OrderBookBids
 	}
 
-	// Make defensive copy while holding lock
 	orderBookCopy := make([][]float64, len(orderBook))
 	for i, level := range orderBook {
 		if len(level) >= 2 {
@@ -35,7 +33,7 @@ func (ac *APICache) CalculateAverageExecutionPrice(symbol string, amount float64
 	ac.mu.RUnlock()
 
 	if len(orderBookCopy) == 0 {
-		return 0, fmt.Errorf("empty order book for %s", symbol)
+		return 0, fmt.Errorf("empty order book")
 	}
 
 	totalFilled := 0.0
@@ -46,19 +44,15 @@ func (ac *APICache) CalculateAverageExecutionPrice(symbol string, amount float64
 			continue
 		}
 
-		price := level[0]
-		size := level[1]
-
+		price, size := level[0], level[1]
 		if !isValidFloat(price) || !isValidFloat(size) {
 			continue
 		}
 
 		if totalFilled+size <= amount {
-			// Can fill entire level
 			totalFilled += size
 			totalCost += price * size
 		} else {
-			// Partial fill of this level
 			remaining := amount - totalFilled
 			totalCost += price * remaining
 			totalFilled = amount
@@ -70,43 +64,40 @@ func (ac *APICache) CalculateAverageExecutionPrice(symbol string, amount float64
 		}
 	}
 
-	// Use relaxed tolerance for less critical conversions
 	tolerance := liquidityToleranceRelaxed
 	if amount > minLargeOrderUSDT {
 		tolerance = liquidityToleranceStrict
 	}
 
 	if totalFilled < amount*tolerance {
-		return 0, fmt.Errorf("insufficient liquidity: only %.2f of %.2f available", totalFilled, amount)
+		return 0, fmt.Errorf("insufficient liquidity")
 	}
 
 	if !isValidFloat(totalFilled) {
-		return 0, fmt.Errorf("no liquidity available")
+		return 0, fmt.Errorf("no liquidity")
 	}
 
-	averagePrice := totalCost / totalFilled
-	if !isValidFloat(averagePrice) {
-		return 0, fmt.Errorf("invalid average price calculated")
+	avgPrice := totalCost / totalFilled
+	if !isValidFloat(avgPrice) {
+		return 0, fmt.Errorf("invalid price")
 	}
 
-	return averagePrice, nil
+	return avgPrice, nil
 }
 
-// CalculateBuyAmountWithUSDT calculates how much crypto can be bought with a specific USDT amount.
-func (ac *APICache) CalculateBuyAmountWithUSDT(symbol string, usdtAmount float64) (cryptoAmount float64, avgPrice float64, err error) {
+func (ac *APICache) CalculateBuyAmountWithUSDT(symbol string, usdtAmount float64) (float64, float64, error) {
 	if !isValidFloat(usdtAmount) {
-		return 0, 0, fmt.Errorf("invalid USDT amount: %f", usdtAmount)
+		return 0, 0, fmt.Errorf("invalid amount")
 	}
 
 	ac.mu.RLock()
 	rate, ok := ac.bybitRates[symbol]
 	if !ok || rate == nil {
 		ac.mu.RUnlock()
-		return 0, 0, fmt.Errorf("rate not available for %s", symbol)
+		return 0, 0, fmt.Errorf("rate not available")
 	}
 
-	// Make defensive copy while holding lock
-	orderBook := rate.OrderBookAsks // We're buying, so we look at asks
+	orderBook := rate.OrderBookAsks
 	orderBookCopy := make([][]float64, len(orderBook))
 	for i, level := range orderBook {
 		if len(level) >= 2 {
@@ -116,7 +107,7 @@ func (ac *APICache) CalculateBuyAmountWithUSDT(symbol string, usdtAmount float64
 	ac.mu.RUnlock()
 
 	if len(orderBookCopy) == 0 {
-		return 0, 0, fmt.Errorf("empty ask order book for %s", symbol)
+		return 0, 0, fmt.Errorf("empty order book")
 	}
 
 	totalUSDTSpent := 0.0
@@ -127,24 +118,19 @@ func (ac *APICache) CalculateBuyAmountWithUSDT(symbol string, usdtAmount float64
 			continue
 		}
 
-		price := level[0]
-		size := level[1]
-
+		price, size := level[0], level[1]
 		if !isValidFloat(price) || !isValidFloat(size) {
 			continue
 		}
 
-		levelCostUSDT := price * size
+		levelCost := price * size
 
-		if totalUSDTSpent+levelCostUSDT <= usdtAmount {
-			// Can buy entire level
-			totalUSDTSpent += levelCostUSDT
+		if totalUSDTSpent+levelCost <= usdtAmount {
+			totalUSDTSpent += levelCost
 			totalCryptoReceived += size
 		} else {
-			// Partial fill of this level
-			remainingUSDT := usdtAmount - totalUSDTSpent
-			partialCrypto := remainingUSDT / price
-			totalCryptoReceived += partialCrypto
+			remaining := usdtAmount - totalUSDTSpent
+			totalCryptoReceived += remaining / price
 			totalUSDTSpent = usdtAmount
 			break
 		}
@@ -154,34 +140,23 @@ func (ac *APICache) CalculateBuyAmountWithUSDT(symbol string, usdtAmount float64
 		}
 	}
 
-	// Use relaxed tolerance for buying
 	if totalUSDTSpent < usdtAmount*liquidityToleranceRelaxed {
-		// Try to use whatever we could get
 		if isValidFloat(totalCryptoReceived) && totalCryptoReceived > 0 {
-			avgPrice = totalUSDTSpent / totalCryptoReceived
+			avgPrice := totalUSDTSpent / totalCryptoReceived
 			return totalCryptoReceived, avgPrice, nil
 		}
-		return 0, 0, fmt.Errorf("insufficient liquidity: only %.2f USDT of %.2f could be spent", totalUSDTSpent, usdtAmount)
+		return 0, 0, fmt.Errorf("insufficient liquidity")
 	}
 
 	if !isValidFloat(totalCryptoReceived) || totalCryptoReceived <= 0 {
-		return 0, 0, fmt.Errorf("no liquidity available")
+		return 0, 0, fmt.Errorf("no liquidity")
 	}
 
-	avgPrice = totalUSDTSpent / totalCryptoReceived
-	if !isValidFloat(avgPrice) {
-		return 0, 0, fmt.Errorf("invalid average price")
-	}
-
+	avgPrice := totalUSDTSpent / totalCryptoReceived
 	return totalCryptoReceived, avgPrice, nil
 }
 
-// CalculateSlippage returns slippage as a percentage
 func (ac *APICache) CalculateSlippage(symbol string, amount float64, isBuy bool) (float64, error) {
-	if !isValidFloat(amount) {
-		return 0, fmt.Errorf("invalid amount: %f", amount)
-	}
-
 	avgPrice, err := ac.CalculateAverageExecutionPrice(symbol, amount, isBuy)
 	if err != nil {
 		return 0, err
@@ -191,7 +166,7 @@ func (ac *APICache) CalculateSlippage(symbol string, amount float64, isBuy bool)
 	rate, ok := ac.bybitRates[symbol]
 	if !ok || rate == nil {
 		ac.mu.RUnlock()
-		return 0, fmt.Errorf("rate not available for %s", symbol)
+		return 0, fmt.Errorf("rate not available")
 	}
 
 	var bestPrice float64
@@ -203,10 +178,8 @@ func (ac *APICache) CalculateSlippage(symbol string, amount float64, isBuy bool)
 	ac.mu.RUnlock()
 
 	if !isValidFloat(bestPrice) {
-		return 0, fmt.Errorf("invalid best price")
+		return 0, fmt.Errorf("invalid price")
 	}
 
-	// Return as percentage
-	slippage := math.Abs((avgPrice-bestPrice)/bestPrice) * 100
-	return slippage, nil
+	return math.Abs((avgPrice-bestPrice)/bestPrice) * 100, nil
 }

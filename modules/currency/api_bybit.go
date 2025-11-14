@@ -11,53 +11,29 @@ import (
 	"time"
 )
 
-// Helper function
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
-// fetchBybitRates fetches crypto rates from the Bybit API.
 func (ac *APICache) fetchBybitRates() error {
 	if !bybitCircuit.CanAttempt() {
-		return fmt.Errorf("bybit circuit breaker is open")
+		return fmt.Errorf("circuit breaker open")
 	}
 
 	log.Println("Fetching Bybit rates...")
-	// Ensure timeout doesn't exceed parent context
-	timeout := bybitAPITimeout
-	if timeout > requestTimeout {
-		timeout = requestTimeout - 500*time.Millisecond
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout*3)
+	ctx, cancel := context.WithTimeout(context.Background(), bybitAPITimeout*3)
 	defer cancel()
+
+	keyPairs := []string{
+		"TONUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT", "DOGEUSDT",
+		"XRPUSDT", "DOTUSDT", "LINKUSDT", "UNIUSDT", "ATOMUSDT", "AVAXUSDT",
+		"NEARUSDT", "APTUSDT", "ARBUSDT", "OPUSDT",
+	}
 
 	fetchedRates := make(map[string]*BybitRate)
 	var mu sync.Mutex
-
-	// Fetch only important pairs first
-	keyPairs := []string{"TONUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT", "DOGEUSDT"}
-
-	// Then add other major cryptos
-	majorCryptos := []string{"XRP", "DOT", "LINK", "UNI", "ATOM", "AVAX", "NEAR", "APT", "ARB", "OP"}
-	for _, crypto := range majorCryptos {
-		symbol := crypto + "USDT"
-		if !contains(keyPairs, symbol) {
-			keyPairs = append(keyPairs, symbol)
-		}
-	}
-
-	// Limit concurrent requests
-	sem := make(chan struct{}, 5)
-	var wg sync.WaitGroup
 	var anySuccess bool
 
+	sem := make(chan struct{}, 5)
+	var wg sync.WaitGroup
+
 	for _, symbol := range keyPairs {
-		// Check context cancellation
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -72,7 +48,6 @@ func (ac *APICache) fetchBybitRates() error {
 
 			rate, err := ac.fetchBybitOrderbook(ctx, sym)
 			if err != nil {
-				// Silent fail for non-existent pairs
 				return
 			}
 			mu.Lock()
@@ -86,20 +61,17 @@ func (ac *APICache) fetchBybitRates() error {
 
 	if !anySuccess {
 		bybitCircuit.RecordFailure()
-		return fmt.Errorf("failed to fetch any Bybit rates")
+		return fmt.Errorf("no rates fetched")
 	}
 
 	bybitCircuit.RecordSuccess()
 
-	// Update metadata for fetched currencies
 	ac.mu.Lock()
 	for key, rate := range fetchedRates {
 		ac.bybitRates[key] = rate
 		ac.lastBybitRates[key] = rate
-		// Mark as tradeable
 		ac.tradeablePairs[key] = true
 
-		// Extract crypto code (remove USDT suffix)
 		if len(key) > 4 && key[len(key)-4:] == "USDT" {
 			cryptoCode := key[:len(key)-4]
 			ac.currencyMetadata[cryptoCode] = &CurrencyMetadata{
@@ -119,24 +91,18 @@ func (ac *APICache) fetchBybitRates() error {
 	return nil
 }
 
-// fetchBybitOrderbook fetches the order book for a specific symbol from Bybit.
 func (ac *APICache) fetchBybitOrderbook(ctx context.Context, symbol string) (*BybitRate, error) {
-	// Apply rate limiting
 	if err := bybitLimiter.Wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limit error: %w", err)
+		return nil, err
 	}
 
-	// Check context before making request
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 	}
 
-	// Use fixed reasonable depth for all pairs (100 levels)
-	limit := 100
-
-	url := fmt.Sprintf("%s?category=spot&symbol=%s&limit=%d", bybitOrderbookURL, symbol, limit)
+	url := fmt.Sprintf("%s?category=spot&symbol=%s&limit=100", bybitOrderbookURL, symbol)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -155,8 +121,8 @@ func (ac *APICache) fetchBybitOrderbook(ctx context.Context, symbol string) (*By
 	var result struct {
 		RetCode int `json:"retCode"`
 		Result  struct {
-			A [][]string `json:"a"` // asks [[price, size], ...]
-			B [][]string `json:"b"` // bids [[price, size], ...]
+			A [][]string `json:"a"`
+			B [][]string `json:"b"`
 		} `json:"result"`
 	}
 
@@ -168,7 +134,6 @@ func (ac *APICache) fetchBybitOrderbook(ctx context.Context, symbol string) (*By
 		return nil, fmt.Errorf("invalid response")
 	}
 
-	// Parse order book into float arrays
 	orderBookAsks := make([][]float64, 0, len(result.Result.A))
 	for _, ask := range result.Result.A {
 		if len(ask) >= 2 {
@@ -201,6 +166,5 @@ func (ac *APICache) fetchBybitOrderbook(ctx context.Context, symbol string) (*By
 		OrderBookBids: orderBookBids,
 		OrderBookAsks: orderBookAsks,
 		LastUpdate:    time.Now(),
-		Volume24h:     0, // Not fetched to avoid double API call
 	}, nil
 }
